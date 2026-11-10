@@ -1,7 +1,8 @@
-Coded using the help of GEMINI ai PRO. NOTE: We are not formally educated in coding websites let alone one that uses AI. This is made for students of the NAAP specifically AMT students who will be taking their LICENSURE. 
-Conventional learning apps and study centers are expensive and to help students in our campus, me and my team deviced this website to help them learn and prepare for FREE.
+INTRODUCTION:
+Hello! My name is RIN! This code means alot for me as I have been working on it for a couple of months~ It was coded using the help of GEMINI ai PRO. NOTE: We are not formally educated in coding websites let alone one that uses AI.
+This is made for students of the NAAP specifically AMT students who will be taking their LICENSURE. 
+Conventional learning apps and study centers are expensive and to help combat this and help students in our campus, me and my team devised this website to help them learn and prepare for FREE! In this code we have integrated a RAG SYSYEM that will simplify making time consuming task easier.
 
- In this code we have integrated a RAG SYSYEM that will simplify making time consuming task easier;
 # PROF SIDE:
  Uploading a module that is aviation related only specific to his designated subject.
  Module editing, these function helps the professor add and remove contents, allowing them to create their own version to upload in the system repository.
