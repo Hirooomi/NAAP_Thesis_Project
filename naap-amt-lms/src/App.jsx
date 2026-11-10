@@ -14,10 +14,17 @@ import HeadAdminDashboard from './pages/HeadAdminDashboard';
 import Support from './pages/Support'; 
 import Profile from './pages/Profile'; 
 
+// THE FIX: Updated import path to match your actual folder structure
+import Flashcards from './pages/Flashcards';
+
+// THE FIX: Import the Global Overlay for the Student/Shared Routes
+import GlobalSocketOverlay from './components/shared/GlobalSocketOverlay';
+
 // --- SECURITY: ROLE-BASED ROUTE GUARD ---
 const ProtectedRoute = ({ children, allowedRoles }) => {
-  const userRole = localStorage.getItem('role'); 
-  const isLoggedIn = !!localStorage.getItem('userId');
+  // THE FIX: Route guard now strictly checks sessionStorage to align with the new auth logic
+  const userRole = sessionStorage.getItem('role'); 
+  const isLoggedIn = !!sessionStorage.getItem('userId');
 
   if (!isLoggedIn) {
     return <Navigate to="/login" replace />;
@@ -58,17 +65,31 @@ export default function App() {
       <Route path="/prof/analytics" element={<ProtectedRoute allowedRoles={['FACULTY', 'HEAD_ADMIN']}><ProfAnalytics /></ProtectedRoute>} />
       <Route path="/prof/frequency" element={<ProtectedRoute allowedRoles={['FACULTY', 'HEAD_ADMIN']}><ProfItemFrequency /></ProtectedRoute>} />
       
-      {/* FIX: Appended /:id so it can catch dynamic module IDs like /reader/MOD-123 */}
-      <Route path="/reader/:id" element={<ProtectedRoute allowedRoles={['STUDENT', 'FACULTY', 'HEAD_ADMIN']}><MockReader /></ProtectedRoute>} />
+      {/* FIX: Wrapped MockReader so students reading PDFs are still affected by the Kill Switch */}
+      <Route path="/reader/:id" element={
+        <ProtectedRoute allowedRoles={['STUDENT', 'FACULTY', 'HEAD_ADMIN']}>
+          <GlobalSocketOverlay>
+            <MockReader />
+          </GlobalSocketOverlay>
+        </ProtectedRoute>
+      } />
 
-      <Route path="/" element={<Layout />}>
-        <Route index element={localStorage.getItem('userId') ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />} />
+      {/* FIX: Wrapped the entire Layout shell so all student sub-pages get the Kill Switch */}
+      <Route path="/" element={
+        <GlobalSocketOverlay>
+          <Layout />
+        </GlobalSocketOverlay>
+      }>
+        {/* THE FIX: Check sessionStorage for the index redirect */}
+        <Route index element={sessionStorage.getItem('userId') ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />} />
         
         <Route path="dashboard" element={<ProtectedRoute allowedRoles={['STUDENT']}><Dashboard /></ProtectedRoute>} />
         <Route path="modules" element={<ProtectedRoute allowedRoles={['STUDENT']}><Explorer mode="modules" /></ProtectedRoute>} />
         <Route path="quizzes" element={<ProtectedRoute allowedRoles={['STUDENT']}><Explorer mode="quizzes" /></ProtectedRoute>} />
         
-        {/* FIX: Appended /:id so it can catch dynamic quiz IDs like /quiz/QZ-123, and allowed HEAD_ADMIN to view */}
+        {/* THE FIX: Flashcards Route */}
+        <Route path="flashcards" element={<ProtectedRoute allowedRoles={['STUDENT', 'FACULTY', 'HEAD_ADMIN']}><Flashcards /></ProtectedRoute>} />
+        
         <Route path="quiz/:id" element={<ProtectedRoute allowedRoles={['STUDENT', 'HEAD_ADMIN']}><QuizRoom /></ProtectedRoute>} />
         <Route path="analytics" element={<ProtectedRoute allowedRoles={['STUDENT']}><Analytics /></ProtectedRoute>} />
         

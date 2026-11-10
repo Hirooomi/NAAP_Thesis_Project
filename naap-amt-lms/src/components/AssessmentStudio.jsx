@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
+
 export default function AssessmentStudio({
   activeTab, setActiveTab, timeLimit, setTimeLimit, randomize, setRandomize,
   setDraftModal, setPublishModal, targetContext, setTargetContext,
@@ -13,7 +16,42 @@ export default function AssessmentStudio({
   const [isSyncingPattern, setIsSyncingPattern] = useState(false);
   const [quizCount, setQuizCount] = useState(10); 
 
-  const userId = localStorage.getItem('userId') || "FAC-2024-0891";
+  // THE FIX: Transition to sessionStorage for auth checks
+  const userId = sessionStorage.getItem('userId') || "FAC-2024-0891";
+  const profName = sessionStorage.getItem('profName') || "ALONZO, Eduardo";
+
+  // ==========================================
+  // WEBSOCKET FILE LOCK EMITTER
+  // ==========================================
+  useEffect(() => {
+    // THE FIX: Transition to sessionStorage
+    const token = sessionStorage.getItem('token');
+    if (!token || !quizTargetSubFolder) return;
+
+    const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace('https://', 'wss://').replace('http://', 'ws://');
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+       ws.send(JSON.stringify({
+          event: 'FILE_LOCK_STATUS',
+          topic: quizTargetSubFolder,
+          isLocked: true,
+          profName: profName
+       }));
+    };
+
+    return () => {
+       if (ws.readyState === WebSocket.OPEN) {
+           ws.send(JSON.stringify({
+              event: 'FILE_LOCK_STATUS',
+              topic: quizTargetSubFolder,
+              isLocked: false,
+              profName: profName
+           }));
+       }
+       ws.close();
+    };
+  }, [quizTargetSubFolder, profName]);
 
   // ==========================================
   // DRAGGABLE DIVIDER SYSTEM
@@ -59,16 +97,23 @@ export default function AssessmentStudio({
   const handleGenerateBulk = async () => {
     setIsGenerating(true);
     try {
+      // THE FIX: Retrieve token for authorization headers
+      const token = sessionStorage.getItem('token');
       const rawChunk = extractedChunks[0];
       if (!rawChunk) throw new Error("No source document found in memory.");
 
-      // THE BUG FIX: Injected user_id so the AI knows whose pattern to mimic
       const payload = {
         context: rawChunk.content, level: activeTab, topic: quizTargetSubFolder || "Aviation Topic", count: quizCount, max_choices: quizMaxChoices, user_id: userId 
       };
 
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/generate-bulk', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      // THE FIX: Added headers to bypass the 401 Unauthorized rejection
+      const response = await fetch(`${API_BASE_URL}api/modules/generate-bulk`, {
+        method: 'POST', 
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}` 
+        }, 
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) throw new Error("AI Quiz Generation failed.");
@@ -99,13 +144,21 @@ export default function AssessmentStudio({
   const handleGenerateSingle = async (type) => {
      setIsGeneratingSingle(true);
      try {
+        // THE FIX: Retrieve token
+        const token = sessionStorage.getItem('token');
         const rawChunk = extractedChunks[0];
         if (!rawChunk) throw new Error("No source document found.");
 
         const payload = { context: rawChunk.content, type: type, level: activeTab, topic: quizTargetSubFolder || "Aviation Topic", user_id: userId };
 
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/generate-single', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        // THE FIX: Inject auth header
+        const response = await fetch(`${API_BASE_URL}api/modules/generate-single`, {
+          method: 'POST', 
+          headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}` 
+          }, 
+          body: JSON.stringify(payload)
         });
 
         if (!response.ok) throw new Error("AI Generation failed.");
@@ -202,13 +255,21 @@ export default function AssessmentStudio({
   const handleCloneQuestion = async (questionData) => {
     setIsCloning(true);
     try {
+      // THE FIX: Retrieve token
+      const token = sessionStorage.getItem('token');
       const rawChunk = extractedChunks[0];
       const payload = {
         context: rawChunk ? rawChunk.content : "", level: activeTab, topic: quizTargetSubFolder || "Aviation Topic", reference_question: questionData, user_id: userId
       };
 
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/clone-question', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      // THE FIX: Inject auth header
+      const response = await fetch(`${API_BASE_URL}api/modules/clone-question`, {
+        method: 'POST', 
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}` 
+        }, 
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) throw new Error("AI Cloning failed.");
@@ -236,10 +297,15 @@ export default function AssessmentStudio({
   const handleSyncProfessorPattern = async () => {
     setIsSyncingPattern(true);
     try {
-      // THE BUG FIX: De-mocked the button. Now it actually connects to your Python NLP engine!
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/analyze-pattern', {
+      // THE FIX: Retrieve token
+      const token = sessionStorage.getItem('token');
+      // THE FIX: Inject auth header
+      const response = await fetch(`${API_BASE_URL}api/modules/analyze-pattern`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}` 
+        },
         body: JSON.stringify({ user_id: userId, questions_list: currentQuestions })
       });
 

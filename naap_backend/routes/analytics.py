@@ -3,41 +3,61 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import uuid
-from socket_manager import manager
+import json
+
 import models
 from database import get_db
 from dependencies import get_current_user, require_role
-
-# THE FIX: Import the WebSocket manager to broadcast live score updates
 from socket_manager import manager
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/analytics", tags=["Global Analytics"])
 
+# ==========================================
+# 1. GLOBAL METRICS & LIVE TELEMETRY MATRIX
+# ==========================================
 @router.get("/global", dependencies=[Depends(require_role(["ADMIN", "FACULTY"]))])
-def get_global_metrics(db: Session = Depends(get_db)):
-    # 1. Count Active Users
-    total_students = db.query(models.User).filter(models.User.role == "STUDENT", models.User.is_active == True).count()
-    total_faculty = db.query(models.User).filter(models.User.role == "FACULTY", models.User.is_active == True).count()
-    
-    # 2. Count Active Sessions (Logged in within the last 30 minutes)
-    thirty_mins_ago = datetime.utcnow() - timedelta(minutes=30)
-    active_sessions = db.query(models.User).filter(models.User.last_login >= thirty_mins_ago).count()
-    active_sessions += 1
+def get_global_metrics(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # 1. Active vs Total Populations
+    total_students = db.query(models.User).filter(models.User.role.in_(["STUDENT", "ALUMNI", "TESTER"])).count()
+    total_faculty = db.query(models.User).filter(models.User.role == "FACULTY").count()
 
-    # 3. Count RAG Modules in Vault
+    live_threshold = datetime.utcnow() - timedelta(minutes=15)
+    
+    active_students_count = db.query(models.User).filter(
+        models.User.role.in_(["STUDENT", "ALUMNI", "TESTER"]),
+        models.User.last_login >= live_threshold
+    ).count()
+
+    online_faculty_query = db.query(models.User).filter(
+        models.User.role == "FACULTY",
+        models.User.last_login >= live_threshold
+    ).all()
+    
+    active_faculty_count = len(online_faculty_query)
+    
+    online_profs_payload = [{
+        "id": prof.id,
+        "name": f"{prof.honorific or 'Prof.'} {prof.last_name}",
+        "subjects": prof.subjects or "General Aviation",
+        "last_active": prof.last_login.strftime("%H:%M") if prof.last_login else "Online"
+    } for prof in online_faculty_query]
+
+    # 2. Vault Modules & Passing Rate
     total_modules = db.query(models.VaultAsset).filter(models.VaultAsset.type == "MODULE").count()
     
-    # 4. Calculate Global Passing Rate (NOW USING SESSIONLOG)
     total_records = db.query(models.SessionLog).count()
     passed_records = db.query(models.SessionLog).filter(models.SessionLog.passed == True).count()
     global_pass_rate = round((passed_records / total_records * 100), 1) if total_records > 0 else 0.0
 
-    # 5. Calculate Readiness by CAAP Subject
+    # 3. CAAP Licensure Readiness
     readiness_data = []
     categories = db.query(models.SessionLog.category).distinct().all()
     
     for cat in categories:
         cat_name = cat[0]
+        if not cat_name:
+            continue
         records = db.query(models.SessionLog).filter(models.SessionLog.category == cat_name).all()
         if records:
             avg_score = sum((r.score / r.total_items) * 100 for r in records if r.total_items > 0) / len(records)
@@ -48,46 +68,126 @@ def get_global_metrics(db: Session = Depends(get_db)):
 
     readiness_data.sort(key=lambda x: x["percentage"], reverse=True)
 
-    # Fetch live logs for the Telemetry feed
-    recent_logs = db.query(models.SessionLog).order_by(models.SessionLog.timestamp.desc()).limit(50).all()
+    # 4. Cohort Academic Breakdown
+    cohort_breakdown = {}
+    years = ["1st Year", "2nd Year", "3rd Year", "4th Year"]
+    for y in years:
+        cohort_students = db.query(models.User).filter(models.User.year_level == y, models.User.role == "STUDENT").all()
+        cohort_ids = [s.id for s in cohort_students]
+        
+        cohort_logs = db.query(models.SessionLog).filter(models.SessionLog.student_id.in_(cohort_ids)).all() if cohort_ids else []
+        cohort_passed = [l for l in cohort_logs if l.passed]
+        
+        rate = round((len(cohort_passed) / len(cohort_logs) * 100), 1) if cohort_logs else 0.0
+        
+        sections_map = {}
+        for s in cohort_students:
+            sec = s.section or "Unassigned"
+            if sec not in sections_map:
+                sections_map[sec] = {"total_students": 0, "logs": []}
+            sections_map[sec]["total_students"] += 1
+            
+        for l in cohort_logs:
+            student = next((s for s in cohort_students if s.id == l.student_id), None)
+            sec = student.section if student and student.section else "Unassigned"
+            if sec in sections_map:
+                sections_map[sec]["logs"].append(l)
+
+        final_sections = {}
+        for sec, data in sections_map.items():
+            sec_passed = [l for l in data["logs"] if l.passed]
+            sec_rate = round((len(sec_passed) / len(data["logs"]) * 100), 1) if data["logs"] else 0.0
+            final_sections[sec] = {
+                "passing_rate": sec_rate,
+                "student_count": data["total_students"],
+                "total_attempts": len(data["logs"])
+            }
+
+        cohort_breakdown[y] = {
+            "passing_rate": rate,
+            "student_count": len(cohort_students),
+            "sections": final_sections
+        }
+
+    # 5. Decode Alumni
+    alumni_users = db.query(models.User).filter(models.User.role == "ALUMNI").all()
+    alumni_data = []
+    for a in alumni_users:
+        try: extra = json.loads(a.suffix) if a.suffix else {}
+        except: extra = {}
+        alumni_data.append({
+            "id": a.id, "name": f"{a.first_name} {a.last_name}",
+            "batch": a.subjects or "Unknown Batch",
+            "degree": extra.get("degree", "BSAMT"), "employment": extra.get("employment", "Unemployed"),
+            "company": extra.get("company", "N/A"), "email": a.email
+        })
+
+    # 6. Decode Testers
+    tester_users = db.query(models.User).filter(models.User.role == "TESTER").all()
+    tester_data = []
+    current_date = datetime.utcnow().date()
+    for t in tester_users:
+        try: extra = json.loads(t.suffix) if t.suffix else {}
+        except: extra = {}
+        end_str = extra.get("end", "")
+        is_expired = False
+        if end_str:
+            try:
+                if current_date > datetime.strptime(end_str, "%Y-%m-%d").date(): is_expired = True
+            except: pass
+        tester_data.append({
+            "id": t.id, "name": f"{t.first_name} {t.last_name}",
+            "institute": extra.get("institute", "Unknown"),
+            "start": extra.get("start", "N/A"), "end": end_str or "N/A",
+            "expired": is_expired, "email": t.email
+        })
+
+    # 7. Role-Filtered Telemetry
+    log_query = db.query(models.SessionLog).order_by(models.SessionLog.timestamp.desc())
+    if current_user.role == "FACULTY":
+        assigned_subjects = [s.strip() for s in (current_user.subjects or "").split(",") if s.strip()]
+        if assigned_subjects:
+            log_query = log_query.filter(models.SessionLog.category.in_(assigned_subjects))
+            
+    recent_logs = log_query.limit(50).all()
     formatted_logs = []
     for log in recent_logs:
         student = db.query(models.User).filter(models.User.id == log.student_id).first()
         student_name = f"{student.last_name}, {student.first_name[0]}." if student else "Unknown"
-        
         score_percent = f"{round((log.score / log.total_items) * 100)}%" if log.total_items > 0 else "0%"
         action_text = f"{'Passed' if log.passed else 'Failed'} {log.quiz_id}"
-        
         time_str = log.timestamp.strftime("%H:%M") if log.timestamp else "Just now"
 
         formatted_logs.append({
             "student": f"{student_name} ({log.student_id})",
+            "student_id": log.student_id,
+            "student_name": student_name,
             "action": action_text,
             "score": score_percent,
             "time": time_str,
-            "category": log.category.split(" ")[0].upper(), # E.g., 'TURBINE' from 'Turbine Engines'
-            "quiz_id": log.quiz_id,
-            "topic": log.quiz_id,
-            "difficulty": log.difficulty,
-            "total_items": log.total_items
+            "category": log.category or "GENERAL",
+            "quiz_id": log.quiz_id
         })
 
     return {
         "metrics": {
-            "students": total_students,
-            "faculty": total_faculty,
-            "active_sessions": active_sessions,
+            "active_students": active_students_count,
+            "total_students": total_students,
+            "active_faculty": active_faculty_count,
+            "total_faculty": total_faculty,
             "modules": total_modules,
             "pass_rate": global_pass_rate
         },
+        "online_profs": online_profs_payload,
+        "cohort_breakdown": cohort_breakdown,
         "readiness": readiness_data,
+        "alumni": alumni_data,
+        "testers": tester_data,
         "logs": formatted_logs
     }
 
-
 @router.get("/jurisdictional/{prof_id}", dependencies=[Depends(require_role(["ADMIN", "FACULTY"]))])
 def get_jurisdictional_analytics(prof_id: str, db: Session = Depends(get_db)):
-    """Fetches analytics strictly limited to the subjects assigned to this specific Professor"""
     prof = db.query(models.User).filter(models.User.id == prof_id).first()
     if not prof or prof.role != "FACULTY":
         raise HTTPException(status_code=404, detail="Faculty member not found.")
@@ -97,7 +197,6 @@ def get_jurisdictional_analytics(prof_id: str, db: Session = Depends(get_db)):
     if not assigned_subjects:
         return {"years": [], "sections": {}, "students": []}
 
-    # Fetch ALL quiz records belonging to this Prof's jurisdiction (NOW USING SESSIONLOG)
     records = db.query(models.SessionLog).filter(models.SessionLog.category.in_(assigned_subjects)).all()
     student_ids = list(set(r.student_id for r in records))
     
@@ -170,27 +269,19 @@ def get_jurisdictional_analytics(prof_id: str, db: Session = Depends(get_db)):
         "students": raw_students
     }
 
-
-from pydantic import BaseModel
-
 class QuizSubmitRequest(BaseModel):
     student_id: str
     quiz_id: str      
-    category: str     
+    category: str      
     difficulty: str   
     score: int
     total_items: int
 
-# ==========================================
-# STUDENT TELEMETRY & QUIZ SUBMISSION
-# ==========================================
-@router.post("/submit-quiz", dependencies=[Depends(require_role(["STUDENT", "FACULTY", "ADMIN"]))])
+@router.post("/submit-quiz", dependencies=[Depends(require_role(["STUDENT", "FACULTY", "ADMIN", "TESTER"]))])
 async def submit_quiz(req: QuizSubmitRequest, db: Session = Depends(get_db)):
-    """Saves the student's live quiz attempt and broadcasts via WebSocket"""
     try:
         passed = (req.score / req.total_items) >= 0.75 if req.total_items > 0 else False
         
-        # THE FIX: Adapted mapping to the Phase 1 SessionLog format
         new_record = models.SessionLog(
             id=f"REC-{uuid.uuid4().hex[:8].upper()}",
             student_id=req.student_id,
@@ -204,10 +295,9 @@ async def submit_quiz(req: QuizSubmitRequest, db: Session = Depends(get_db)):
         db.add(new_record)
         db.commit()
 
-        # THE FIX: Push a live JSON broadcast to all connected dashboards!
         await manager.broadcast({
             "event": "NEW_TELEMETRY",
-            "message": f"Student {req.student_id} submitted {req.quiz_id}."
+            "message": f"Student {req.student_id} completed {req.quiz_id}."
         })
 
         return {"status": "success", "message": "Quiz telemetry synced."}
@@ -215,9 +305,8 @@ async def submit_quiz(req: QuizSubmitRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/student/{student_id}", dependencies=[Depends(require_role(["STUDENT", "FACULTY", "ADMIN"]))])
+@router.get("/student/{student_id}", dependencies=[Depends(require_role(["STUDENT", "FACULTY", "ADMIN", "TESTER"]))])
 def get_student_analytics(student_id: str, db: Session = Depends(get_db)):
-    """Fetches all quiz attempts for a specific student"""
     records = db.query(models.SessionLog).filter(models.SessionLog.student_id == student_id).order_by(models.SessionLog.timestamp.desc()).all()
     
     logs = []

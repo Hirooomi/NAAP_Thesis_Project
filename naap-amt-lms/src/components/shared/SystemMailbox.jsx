@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { API_BASE_URL } from "../../apiConfig"; 
 
 export default function SystemMailbox() {
   const [isOpen, setIsOpen] = useState(false);
@@ -6,16 +7,14 @@ export default function SystemMailbox() {
   const [unreadCount, setUnreadCount] = useState(0);
   const dropdownRef = useRef(null);
 
-  // Fetch announcements from the backend
   const fetchAnnouncements = async () => {
     try {
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/announcements');
+      const response = await fetch(`${API_BASE_URL}api/comms/announcements`);
       if (response.ok) {
         const data = await response.json();
         if (data.status === 'success') {
-          setAnnouncements(data.announcements);
+          setAnnouncements(data.announcements || []);
           
-          // Simple unread logic: count how many we haven't seen yet
           const lastSeenId = localStorage.getItem('lastSeenAnnouncementId');
           if (data.announcements.length > 0 && data.announcements[0].id !== lastSeenId) {
              setUnreadCount(data.announcements.filter(a => a.id !== lastSeenId).length);
@@ -29,12 +28,37 @@ export default function SystemMailbox() {
 
   useEffect(() => {
     fetchAnnouncements();
-    // Poll every 60 seconds to keep it live
-    const interval = setInterval(fetchAnnouncements, 60000);
-    return () => clearInterval(interval);
+    
+    // THE FIX: Correct WebSocket Endpoint and Error Boundary
+    const token = sessionStorage.getItem('token');
+    if (!token) return;
+
+    try {
+        const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace(/^http/, 'ws');
+        const ws = new WebSocket(wsUrl);
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.event === 'SYSTEM_MAIL') {
+                    console.log("[WS] Incoming Server Mail detected.");
+                    fetchAnnouncements();
+                }
+            } catch (parseError) {
+                // Ignore parse errors silently to prevent UI crash
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.warn("Mailbox WebSocket connection suppressed error to protect UI state.", error);
+        };
+
+        return () => ws.close();
+    } catch (e) {
+        console.error("Failed to mount mailbox socket:", e);
+    }
   }, []);
 
-  // Close dropdown if clicked outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -48,7 +72,6 @@ export default function SystemMailbox() {
   const handleOpenMailbox = () => {
     setIsOpen(!isOpen);
     if (!isOpen && announcements.length > 0) {
-      // Mark as read when opened
       setUnreadCount(0);
       localStorage.setItem('lastSeenAnnouncementId', announcements[0].id);
     }
@@ -64,14 +87,12 @@ export default function SystemMailbox() {
 
   return (
     <div className="relative z-50" ref={dropdownRef}>
-      {/* THE MAILBOX ICON / TRIGGER */}
       <button 
         onClick={handleOpenMailbox}
         className="relative bg-slate-900 border border-slate-800 hover:border-slate-600 w-10 h-10 rounded-xl flex items-center justify-center transition-colors shadow-inner"
       >
         <span className="text-lg">📬</span>
         
-        {/* UNREAD BADGE */}
         {unreadCount > 0 && (
           <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-black text-white shadow-lg animate-pulse">
             {unreadCount > 9 ? '9+' : unreadCount}
@@ -79,7 +100,6 @@ export default function SystemMailbox() {
         )}
       </button>
 
-      {/* THE DROPDOWN PANEL */}
       {isOpen && (
         <div className="absolute right-0 mt-3 w-80 sm:w-96 bg-slate-950 border border-slate-800 rounded-2xl shadow-[0_10px_40px_rgba(0,0,0,0.5)] overflow-hidden animate-fade-in flex flex-col">
           

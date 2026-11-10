@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { API_BASE_URL } from '../apiConfig';
-// Pure SVG Line Art Icons
+
 const EyeIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
 );
@@ -36,13 +36,19 @@ export default function Login() {
     setSuccess('');
     setIsProcessing(true);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); 
+
     if (authMode === 'STUDENT_LOGIN' || authMode === 'FACULTY_LOGIN') {
       try {
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/auth/login', {
+        const response = await fetch(`${API_BASE_URL}api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: id.trim(), password: password }) 
+          body: JSON.stringify({ user_id: id.trim(), password: password }),
+          signal: controller.signal 
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
           const errorData = await response.json();
@@ -51,40 +57,76 @@ export default function Login() {
 
         const data = await response.json();
         
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('role', data.role);
-        localStorage.setItem('userId', data.id);
+        // THE FIX: Universal standardized session storage initialization for the live sync hooks
+        sessionStorage.clear();
+        sessionStorage.setItem('token', data.token);
+        sessionStorage.setItem('role', data.role);
+        sessionStorage.setItem('userId', data.id);
+        
+        if (data.subjects) {
+            const subjectString = Array.isArray(data.subjects) ? data.subjects.join(', ') : data.subjects;
+            sessionStorage.setItem('subjects', subjectString);
+        } else {
+            sessionStorage.setItem('subjects', 'General Aviation');
+        }
         
         if (data.require_password_change) {
-            localStorage.setItem('forcePassChange', 'true');
-            if (data.role === 'STUDENT') localStorage.setItem('studentName', data.name);
-            else localStorage.setItem('profName', data.name);
-            
+            sessionStorage.setItem('forcePassChange', 'true');
+            if (data.role === 'STUDENT') sessionStorage.setItem('studentName', data.name);
+            else sessionStorage.setItem('profName', data.name);
+            // Route to profile where the change password UI lives
             navigate('/profile');
             return;
         }
 
         if (data.role === 'HEAD_ADMIN') {
-          localStorage.setItem('profName', data.name);
+          sessionStorage.setItem('profName', data.name);
           navigate('/admin');
         } else if (data.role === 'FACULTY') {
-          localStorage.setItem('profName', data.name);
+          sessionStorage.setItem('profName', data.name);
           navigate('/prof');
         } else {
-          localStorage.setItem('studentName', data.name);
+          sessionStorage.setItem('studentName', data.name);
+          const savedSessionData = localStorage.getItem('activeQuizSession');
+          if (savedSessionData) {
+              try {
+                  const savedSession = JSON.parse(savedSessionData);
+                  const elapsedSeconds = Math.floor((Date.now() - savedSession.timestamp) / 1000);
+                  const remainingTime = savedSession.timeLeft - elapsedSeconds;
+                  
+                  if (remainingTime > 0) {
+                      alert("⚠️ INTERRUPTED QUIZ DETECTED: You have an active assessment. Resuming now...");
+                      navigate('/quiz-room', { 
+                          state: { itemName: savedSession.itemName, difficulty: savedSession.difficulty, category: savedSession.category }
+                      });
+                      return; 
+                  } else {
+                      localStorage.removeItem('activeQuizSession');
+                  }
+              } catch(err) {
+                  localStorage.removeItem('activeQuizSession');
+              }
+          }
           navigate('/dashboard');
         }
-        return; 
-
-      } catch (err) { setError(err.message); } 
-      finally { setIsProcessing(false); }
+      } catch (err) { 
+          if (err.name === 'AbortError') {
+              setError("Network Timeout: Microsoft Dev Tunnels is currently overloaded. Please try logging in again.");
+          } else {
+              setError(err.message); 
+          }
+      } 
+      finally { 
+          setIsProcessing(false); 
+          clearTimeout(timeoutId);
+      }
       return;
     }
 
     if (authMode === 'FORGOT_PASSWORD') {
       if (!email || !email.includes('@')) { setError('Please enter a valid registered email address.'); setIsProcessing(false); return; }
       try {
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/auth/forgot-password', {
+        const response = await fetch(`${API_BASE_URL}api/auth/forgot-password`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: email })
@@ -107,7 +149,7 @@ export default function Login() {
       if (!password || password.length < 4) { setError('Please enter a valid new password (minimum 4 characters).'); setIsProcessing(false); return; }
 
       try {
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/auth/verify-reset-otp', {
+        const response = await fetch(`${API_BASE_URL}api/auth/verify-reset-otp`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: email, otp: otp, new_password: password })
@@ -135,16 +177,12 @@ export default function Login() {
       }
 
       try {
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/users/unified-register', {
+        const response = await fetch(`${API_BASE_URL}api/users/unified-register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-              student_id: id.trim(), 
-              email: email.trim(), 
-              first_name: firstName.trim(),
-              last_name: lastName.trim(),
-              year_level: yearLevel,
-              section: section
+              student_id: id.trim(), email: email.trim(), first_name: firstName.trim(),
+              last_name: lastName.trim(), year_level: yearLevel, section: section
           })
         });
 
@@ -181,7 +219,7 @@ export default function Login() {
            authMode === 'FORGOT_PASSWORD' || authMode === 'OTP_VERIFICATION' ? 'Password Recovery' : 'Student Login'}
         </h2>
 
-        {error && <div className="bg-red-900/20 border border-red-500/30 text-red-400 p-3 rounded-lg text-xs font-bold text-center mb-6 animate-pulse">{error}</div>}
+        {error && <div className="bg-red-900/20 border border-red-500/30 text-red-400 p-3 rounded-lg text-xs font-bold text-center mb-6">{error}</div>}
         {success && <div className="bg-emerald-900/20 border border-emerald-500/30 text-emerald-400 p-3 rounded-lg text-xs font-bold text-center mb-6 animate-fade-in">{success}</div>}
 
         <form onSubmit={handleAuth} className="space-y-6">
@@ -251,7 +289,6 @@ export default function Login() {
                     </select>
                   </div>
               </div>
-
             </div>
           )}
 
@@ -262,7 +299,7 @@ export default function Login() {
                   {authMode === 'OTP_VERIFICATION' ? 'Create New Password' : 'Password'}
                 </label>
                 {(authMode === 'STUDENT_LOGIN' || authMode === 'FACULTY_LOGIN') && (
-                  <button type="button" onClick={() => { setAuthMode('FORGOT_PASSWORD'); setError(''); setSuccess(''); setEmail(''); }} className="text-[9px] text-blue-500 hover:text-blue-400 font-bold uppercase tracking-widest transition-colors">
+                  <button type="button" onClick={() => { setAuthMode('FOR পলFORGOT_PASSWORD'); setError(''); setSuccess(''); setEmail(''); setIsProcessing(false); }} className="text-[9px] text-blue-500 hover:text-blue-400 font-bold uppercase tracking-widest transition-colors">
                     Forgot Password?
                   </button>
                 )}
@@ -287,15 +324,17 @@ export default function Login() {
         <div className="mt-8 flex flex-col gap-3 text-center border-t border-slate-800 pt-6">
           {authMode === 'STUDENT_LOGIN' && (
             <>
-              <button onClick={() => { setAuthMode('STUDENT_SIGNUP'); setError(''); setSuccess(''); setId(''); setPassword(''); }} className="text-[10px] text-slate-500 hover:text-white font-bold uppercase tracking-widest transition-colors">Create Student Account</button>
-              <button onClick={() => { setAuthMode('FACULTY_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); }} className="text-[10px] text-slate-600 hover:text-blue-500 font-bold uppercase tracking-widest transition-colors mt-2">Faculty / Admin Access →</button>
+              <button onClick={() => { setAuthMode('STUDENT_SIGNUP'); setError(''); setSuccess(''); setId(''); setPassword(''); setIsProcessing(false); }} className="text-[10px] text-slate-500 hover:text-white font-bold uppercase tracking-widest transition-colors">Create Student Account</button>
+              <button onClick={() => { setAuthMode('FACULTY_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); setIsProcessing(false); }} className="text-[10px] text-slate-600 hover:text-blue-500 font-bold uppercase tracking-widest transition-colors mt-2">Faculty / Admin Access →</button>
             </>
           )}
+          
           {(authMode === 'STUDENT_SIGNUP' || authMode === 'FORGOT_PASSWORD' || authMode === 'OTP_VERIFICATION') && (
-            <button onClick={() => { setAuthMode('STUDENT_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); }} className="text-[10px] text-slate-500 hover:text-white font-bold uppercase tracking-widest transition-colors">← Back to Student Login</button>
+            <button onClick={() => { setAuthMode('STUDENT_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); setIsProcessing(false); }} className="text-[10px] text-slate-500 hover:text-white font-bold uppercase tracking-widest transition-colors">← Back to Student Login</button>
           )}
+
           {authMode === 'FACULTY_LOGIN' && (
-            <button onClick={() => { setAuthMode('STUDENT_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); }} className="text-[10px] text-slate-500 hover:text-blue-400 font-bold uppercase tracking-widest transition-colors">← Return to Student Portal</button>
+            <button onClick={() => { setAuthMode('STUDENT_LOGIN'); setError(''); setSuccess(''); setId(''); setPassword(''); setIsProcessing(false); }} className="text-[10px] text-slate-500 hover:text-blue-400 font-bold uppercase tracking-widest transition-colors">← Return to Student Portal</button>
           )}
         </div>
 

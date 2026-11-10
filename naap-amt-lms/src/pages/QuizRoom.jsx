@@ -4,7 +4,8 @@ import { useNavigate, useLocation } from 'react-router-dom';
 export default function QuizRoom() {
   const navigate = useNavigate();
   const location = useLocation();
-  const studentId = localStorage.getItem('userId');
+  // THE FIX: Secure ID fetch
+  const studentId = sessionStorage.getItem('userId');
   
   const { itemName = 'Unknown', difficulty = 'Lvl 1: Pre-Test', category = 'General Aviation' } = location.state || {};
   
@@ -20,9 +21,9 @@ export default function QuizRoom() {
   useEffect(() => {
     const fetchVaultQuiz = async () => {
         try {
-            const token = localStorage.getItem('token'); // Grab the token
-            const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/assets', {
-                // INJECT THE HEADER HERE
+            // THE FIX: Secure Token fetch
+            const token = sessionStorage.getItem('token'); 
+            const res = await fetch('https://v7k00hrv-8000.asse.devtunnels.ms/api/vault/assets', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -60,7 +61,11 @@ export default function QuizRoom() {
   }, [itemName, category]);
 
   // --- FAULT TOLERANCE WITH ABSOLUTE TIME TRACKING ---
-  const savedSession = JSON.parse(localStorage.getItem('activeQuizSession'));
+  // THE FIX: This remains in localStorage so it outlives browser closures!
+  // --- FAULT TOLERANCE WITH ABSOLUTE TIME TRACKING ---
+  // THE FIX: Tie the session strictly to this specific user's ID
+  const sessionKey = `activeQuizSession_${studentId}`;
+  const savedSession = JSON.parse(localStorage.getItem(sessionKey));
   const isResuming = savedSession && savedSession.itemName === itemName && savedSession.difficulty === difficulty;
 
   let calculatedTime = isOverall ? 1200 : 600; // 20 mins for overall, 10 mins for standard
@@ -80,14 +85,14 @@ export default function QuizRoom() {
   const [isFinished, setIsFinished] = useState(calculatedTime === 0);
 
   // --- THE AUTO-SAVER ENGINE ---
+// --- THE AUTO-SAVER ENGINE ---
   useEffect(() => {
     if (!isFinished && !showAbortModal && !isLoadingQuiz && quizQuestions.length > 0) {
-      localStorage.setItem('activeQuizSession', JSON.stringify({
+      localStorage.setItem(`activeQuizSession_${studentId}`, JSON.stringify({
         itemName, difficulty, category, currentItem, correctAnswers, timeLeft, timestamp: Date.now()
       }));
     }
-  }, [currentItem, correctAnswers, timeLeft, itemName, difficulty, category, isFinished, showAbortModal, isLoadingQuiz, quizQuestions]);
-
+  }, [currentItem, correctAnswers, timeLeft, itemName, difficulty, category, isFinished, showAbortModal, isLoadingQuiz, quizQuestions, studentId]);
   // Timer Engine
   useEffect(() => {
     let timer;
@@ -131,14 +136,15 @@ export default function QuizRoom() {
     }
   };
 
-  const processFinalScore = async (route) => {
+const processFinalScore = async (route) => {
     try {
-        const token = localStorage.getItem('token'); // Grab the token
-        await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/analytics/submit-quiz', {
+        const token = sessionStorage.getItem('token'); 
+        
+        const res = await fetch('https://v7k00hrv-8000.asse.devtunnels.ms/api/analytics/submit-quiz', {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}` // INJECT THE HEADER HERE
+                'Authorization': `Bearer ${token}` 
             },
             body: JSON.stringify({
                 student_id: studentId,
@@ -149,12 +155,31 @@ export default function QuizRoom() {
                 total_items: totalItems
             })
         });
-    } catch(e) {
-        console.error("Failed to sync score to DB");
-    }
 
-    localStorage.removeItem('activeQuizSession');
-    navigate(route);
+        if (!res.ok) {
+            throw new Error(`Server rejected submission with status: ${res.status}`);
+        }
+
+        // TELEMETRY PING (Only run if DB save succeeds)
+        try {
+            const ws = new WebSocket('wss://v7k00hrv-8000.asse.devtunnels.ms/api/ws/connect');
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ event: "NEW_TELEMETRY", message: "Student Quiz Submitted" }));
+                setTimeout(() => ws.close(), 1000);
+            };
+        } catch (wsErr) {
+            console.warn("Telemetry Ping Failed, but DB save succeeded.", wsErr);
+        }
+
+        // SAFE TO WIPE SESSION & NAVIGATE
+        localStorage.removeItem(`activeQuizSession_${studentId}`);
+        navigate(route);
+
+    } catch(e) {
+        console.error("CRITICAL: Failed to sync score to DB", e);
+        alert("🔴 CONNECTION ERROR: Could not save your score to the database. Please check your internet connection and try clicking Save again. Your progress has not been lost.");
+        // We DO NOT navigate away, and we DO NOT clear local storage here.
+    }
   };
 
   if (isLoadingQuiz) {

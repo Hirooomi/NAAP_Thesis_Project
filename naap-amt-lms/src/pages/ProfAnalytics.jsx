@@ -1,25 +1,31 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { API_BASE_URL } from "../apiConfig";
 
 export default function ProfAnalytics() {
   const navigate = useNavigate();
   
-  // --- LIVE DATABASE STATES ---
   const [rawStudents, setRawStudents] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
-    // THE FIX: Fetch Live Data & Dynamically construct the Student Matrix!
     const fetchGlobalTelemetry = async () => {
         try {
-            // Reusing the global endpoint until Phase 1 backend schema is established
-            const res = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/analytics/global`);
+            const token = sessionStorage.getItem('token');
+            if (!token || token === 'null') {
+                setIsLoading(false);
+                return;
+            }
+            
+            const res = await fetch(`${API_BASE_URL}api/analytics/global`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
             if (res.ok) {
                 const data = await res.json();
                 const logs = data.logs || [];
                 
-                // Group the scattered logs by Student ID
                 const studentMap = {};
                 logs.forEach(log => {
                     const id = log.student_id || log.student || 'Unknown';
@@ -29,7 +35,6 @@ export default function ProfAnalytics() {
                     }
                     studentMap[id].logs.push(log);
                     
-                    // Normalize scores for averaging
                     const parsedScore = parseInt(String(log.score).replace('%', ''));
                     if (!isNaN(parsedScore)) {
                         studentMap[id].totalScore += parsedScore;
@@ -37,29 +42,26 @@ export default function ProfAnalytics() {
                     }
                 });
 
-                // Calculate Averages and Status
                 const processedStudents = Object.values(studentMap).map(student => {
                     const avg = student.totalItems > 0 ? Math.round(student.totalScore / student.totalItems) : 0;
                     let status = 'AVERAGE';
                     if (avg >= 90) status = 'EXCELLENT';
                     else if (avg < 75) status = 'CRITICAL';
 
-                    // Find weak points (topics where they scored below 75)
                     const weakPoints = student.logs
                         .filter(l => parseInt(String(l.score).replace('%', '')) < 75)
                         .map(l => l.topic || l.action || 'Unknown Topic');
 
-                    // Map it into the structure the UI expects
                     return {
                         id: student.id,
                         name: student.name,
-                        section: "BSAMT 3-A", // Placeholder until Phase 1 schema
+                        section: "BSAMT 3-A", 
                         sy: "2025-2026",
                         avg,
                         status,
                         logs: student.logs.map(l => ({
                             module: l.topic || l.action,
-                            preTest: Math.max(0, parseInt(String(l.score).replace('%', '')) - 15) || 0, // Mock pre-test for UI flow
+                            preTest: Math.max(0, parseInt(String(l.score).replace('%', '')) - 15) || 0, 
                             postTest: parseInt(String(l.score).replace('%', '')) || 0,
                             tries: 1,
                             weakPoints: [...new Set(weakPoints)]
@@ -75,22 +77,30 @@ export default function ProfAnalytics() {
             setIsLoading(false);
         }
     };
+    
     fetchGlobalTelemetry();
+
+    const token = sessionStorage.getItem('token');
+    
+    // THE FIX: Only build the socket if the token is valid, preventing a crash!
+    let ws = null;
+    if (token && token !== 'null' && token !== 'undefined') {
+        const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace('https://', 'wss://').replace('http://', 'ws://');
+        ws = new WebSocket(wsUrl);
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.event === "NEW_TELEMETRY") {
+                fetchGlobalTelemetry(); 
+            }
+        };
+    }
+    
+    return () => {
+        if (ws) ws.close();
+    };
   }, []);
 
-    // THE FIX: Listen for Live Backend WebSocket Events
-    const token = localStorage.getItem('token');
-const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?token=${token}`);
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.event === "NEW_TELEMETRY") {
-            console.log("[WS] Student Submitted Quiz! Refreshing Matrix...");
-            fetchGlobalTelemetry(); // Instantly rebuild the student grade dossier!
-        }
-    };
-    return () => ws.close(); // Cleanup
-    
-  // --- FILTERING & A-Z SORTING ENGINE ---
   const filteredStudents = useMemo(() => {
     return rawStudents
       .filter(s => s.name.toLowerCase().includes(searchQuery.toLowerCase()) || s.id.includes(searchQuery))
@@ -106,7 +116,7 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
   const currentLogs = selectedStudent?.logs || [];
 
   if (isLoading) {
-      return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-500 font-mono text-xs uppercase tracking-widest animate-pulse">Syncing Jurisdictional Telemetry...</div>;
+      return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-500 font-mono text-xs uppercase tracking-widest">Syncing Jurisdictional Telemetry...</div>;
   }
 
   return (
@@ -122,7 +132,6 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
 
       <div className="flex-grow grid grid-cols-1 lg:grid-cols-12 gap-8 overflow-hidden">
         
-        {/* --- LEFT PANE: STUDENT ROSTER (A-Z) --- */}
         <div className="lg:col-span-4 bg-slate-800 rounded-[2rem] border border-slate-700 shadow-2xl flex flex-col overflow-hidden">
           <div className="p-6 border-b border-slate-700 bg-slate-800 z-10">
             <div className="flex justify-between items-center mb-4">
@@ -150,7 +159,7 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
                 >
                   <div className="flex justify-between items-start mb-2">
                     <span className={`font-black uppercase tracking-wider text-sm ${selectedStudent?.id === student.id ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>{student.name}</span>
-                    <span className={`text-[9px] font-black px-2 py-1 rounded tracking-[0.2em] ${student.status === 'EXCELLENT' ? 'bg-emerald-900/50 text-emerald-400' : student.status === 'CRITICAL' ? 'bg-red-900/50 text-red-400 animate-pulse' : 'bg-slate-800 text-slate-400'}`}>
+                    <span className={`text-[9px] font-black px-2 py-1 rounded tracking-[0.2em] ${student.status === 'EXCELLENT' ? 'bg-emerald-900/50 text-emerald-400' : student.status === 'CRITICAL' ? 'bg-red-900/50 text-red-400' : 'bg-slate-800 text-slate-400'}`}>
                       {student.status}
                     </span>
                   </div>
@@ -164,14 +173,12 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
           </div>
         </div>
 
-        {/* --- RIGHT PANE: DETAILED DOSSIER --- */}
         {selectedStudent ? (
           <div className="lg:col-span-8 bg-slate-950 rounded-[2rem] border border-slate-800 shadow-2xl flex flex-col relative overflow-hidden animate-fade-in">
             <div className={`absolute top-0 right-0 w-96 h-96 rounded-full blur-[120px] opacity-10 pointer-events-none ${selectedStudent.status === 'CRITICAL' ? 'bg-red-600' : selectedStudent.status === 'EXCELLENT' ? 'bg-emerald-600' : 'bg-blue-600'}`}></div>
             
             <div className="p-8 md:p-10 flex-grow overflow-y-auto custom-scrollbar relative z-10">
               
-              {/* DOSSIER HEADER */}
               <div className="flex justify-between items-end mb-8 border-b border-slate-800 pb-6">
                 <div>
                   <h2 className="text-4xl font-black text-white tracking-[0.1em] uppercase mb-2">{selectedStudent.name}</h2>
@@ -179,12 +186,11 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
                 </div>
                 <div className="flex gap-3">
                   {selectedStudent.status === 'CRITICAL' && (
-                    <button className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-colors shadow-lg shadow-red-900/40 animate-pulse">Initiate Intervention</button>
+                    <button className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-colors shadow-lg shadow-red-900/40">Initiate Intervention</button>
                   )}
                 </div>
               </div>
 
-              {/* RAG WEAK POINT DIAGNOSTIC BOX */}
               <div className="flex flex-col md:flex-row gap-8 mt-4 mb-8">
                 <div className="flex-1">
                   <p className={`font-mono text-[10px] tracking-widest uppercase mb-3 font-bold text-slate-500`}>Flagged Concepts:</p>
@@ -217,7 +223,6 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
                 </div>
               </div>
 
-              {/* DETAILED ASSESSMENT HISTORY */}
               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] mb-4">Assessment History</h3>
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-inner">
                 <table className="w-full text-left">

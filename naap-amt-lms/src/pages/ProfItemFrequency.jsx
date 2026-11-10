@@ -1,179 +1,141 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { API_BASE_URL } from '../apiConfig';
 
 export default function ProfItemFrequency() {
   const navigate = useNavigate();
+  const [quizzes, setQuizzes] = useState([]);
+  const [selectedQuizId, setSelectedQuizId] = useState('');
+  const [analysisData, setAnalysisData] = useState([]);
+  const [isLoading, setIsLoading] = useState(false); // Default to false to prevent initial spin
 
-  // THE FIX: State for dynamically loaded and tallied questions
-  const [quizData, setQuizData] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const fetchQuizzes = async () => {
+    try {
+      const token = sessionStorage.getItem('token');
+      if (!token || token === 'null') return; // Stop if no valid token
+      
+      const res = await fetch(`${API_BASE_URL}api/vault/catalog?type=QUIZ`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setQuizzes(data.items || []);
+        if (data.items && data.items.length > 0 && !selectedQuizId) {
+            setSelectedQuizId(data.items[0].id);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch quizzes", err);
+    }
+  };
+
+  const fetchAnalysis = async (quizId) => {
+      if (!quizId) return; // Stop if no quiz is selected
+      setIsLoading(true);
+      try {
+          const token = sessionStorage.getItem('token');
+          if (!token || token === 'null') {
+              setIsLoading(false);
+              return;
+          }
+          const res = await fetch(`${API_BASE_URL}api/analytics/item-frequency/${quizId}`, {
+              headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (res.ok) {
+              const data = await res.json();
+              setAnalysisData(data.analysis || []);
+          }
+      } catch (err) {
+          console.error("Analysis fetch failed", err);
+      } finally {
+          setIsLoading(false);
+      }
+  };
 
   useEffect(() => {
-      const fetchAndTallyData = async () => {
-          try {
-              // 1. Fetch Global Telemetry
-              const analyticsRes = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/analytics/global`);
-              const analyticsData = await analyticsRes.json();
-              const logs = analyticsData.logs || [];
-
-              // 2. Fetch Vault Quizzes
-              const vaultRes = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/assets`);
-              const vaultData = await vaultRes.json();
-              const quizzes = vaultData.quizzes || [];
-
-              // 3. Aggregate logic: Tally right and wrong across all active quizzes
-              const tallyMap = {};
-              
-              // We aggregate the logs to see how many got right vs wrong based on standard items
-              logs.forEach(log => {
-                  const qId = log.quiz_id || log.topic || "Unknown";
-                  const score = parseInt(String(log.score).replace('%', ''));
-                  const total = parseInt(log.total_items) || 10;
-                  
-                  if (!isNaN(score)) {
-                      if (!tallyMap[qId]) {
-                          tallyMap[qId] = {
-                              id: qId,
-                              lvl: log.difficulty || "LVL 1",
-                              q: `Assessment Block: ${qId}`, // Fallback if no specific question text
-                              right: 0,
-                              wrong: 0,
-                              review: false
-                          };
-                      }
-                      // Estimate correct/incorrect tallies per assessment
-                      const rightAnswers = Math.round((score / 100) * total);
-                      const wrongAnswers = total - rightAnswers;
-                      
-                      tallyMap[qId].right += rightAnswers;
-                      tallyMap[qId].wrong += wrongAnswers;
-                      
-                      // Auto-flag review if fail rate exceeds 50%
-                      const failRate = tallyMap[qId].wrong / (tallyMap[qId].right + tallyMap[qId].wrong);
-                      if (failRate >= 0.5) tallyMap[qId].review = true;
-                  }
-              });
-
-              setQuizData(Object.values(tallyMap));
-          } catch (e) {
-              console.error("Failed to map item frequencies");
-          } finally {
-              setIsLoading(false);
-          }
-      };
-      
-      fetchAndTallyData();
+    fetchQuizzes();
   }, []);
-// THE FIX: Listen for Live Backend WebSocket Events
-    const token = localStorage.getItem('token');
-const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?token=${token}`);
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.event === "NEW_TELEMETRY" || data.event === "VAULT_UPDATE") {
-            console.log("[WS] Tally Changed! Running Recalculation Algorithm...");
-            fetchAndTallyData(); // Instantly recalculate item fail rates!
-        }
-    };
-    return () => ws.close(); // Cleanup
-  if (isLoading) {
-      return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-amber-500 font-mono text-sm animate-pulse uppercase tracking-widest">Running Tally Algorithms...</div>;
-  }
 
-  const itemsAnalyzed = quizData.length;
-  const flaggedQuestions = quizData.filter(q => q.review).length;
+  useEffect(() => {
+      if (selectedQuizId) {
+          fetchAnalysis(selectedQuizId);
+      }
+  }, [selectedQuizId]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-300 font-sans p-4 md:p-10 animate-fade-in">
-      <div className="max-w-[100rem] mx-auto w-full">
+    <div className="min-h-screen bg-slate-900 text-slate-300 font-sans p-4 md:p-10 animate-fade-in">
+      <header className="max-w-7xl mx-auto mb-8 flex justify-between items-end border-b border-slate-800 pb-6">
+        <div>
+          <button onClick={() => navigate('/prof')} className="text-slate-500 hover:text-white text-[10px] font-black uppercase tracking-[0.2em] mb-4 flex items-center gap-2 transition-colors">
+            <span>←</span> Return to Command Center
+          </button>
+          <h1 className="text-3xl font-black text-white tracking-[0.2em] uppercase">Item <span className="text-amber-500">Frequency Analysis</span></h1>
+        </div>
         
-        {/* HEADER & RETURN */}
-        <button onClick={() => navigate('/prof')} className="text-slate-600 hover:text-white text-[10px] font-black uppercase tracking-[0.2em] mb-8 flex items-center gap-2 transition-colors">
-          <span>←</span> Return to Command Center
-        </button>
-
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end mb-10 border-b border-slate-800 pb-8 gap-6">
-          <div>
-            <h1 className="text-4xl md:text-5xl font-black text-white tracking-[0.1em] uppercase mb-2">
-              Item Frequency <span className="text-amber-500">Analysis</span>
-            </h1>
-            <p className="text-slate-500 font-mono text-[10px] uppercase tracking-widest">Identify Critical Algorithmic Weak Points</p>
-          </div>
+        <div className="flex flex-col items-end">
+          <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2">Target Assessment</label>
+          <select 
+              value={selectedQuizId} 
+              onChange={(e) => setSelectedQuizId(e.target.value)}
+              className="bg-slate-950 border border-slate-700 text-amber-400 font-black text-[10px] uppercase tracking-widest p-3 rounded-lg outline-none focus:border-amber-500 w-64"
+          >
+              <option value="" disabled>Select an Assessment...</option>
+              {quizzes.map(q => (
+                  <option key={q.id} value={q.id}>{q.title}</option>
+              ))}
+          </select>
         </div>
+      </header>
 
-        {/* TOP METRIC CARDS */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between h-32">
-            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Items Analyzed</h3>
-            <span className="text-5xl font-black text-blue-500">{itemsAnalyzed}</span>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between h-32 relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-red-900/10 rounded-bl-full pointer-events-none"></div>
-            <h3 className="text-[10px] font-black text-red-400 uppercase tracking-widest relative z-10">Flagged Questions (High Fail Rate)</h3>
-            <span className="text-5xl font-black text-red-500 relative z-10">{flaggedQuestions}</span>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex items-center justify-center h-32">
-            <select className="bg-slate-950 border border-slate-800 text-white w-full h-full text-xs font-black px-4 rounded-xl outline-none cursor-pointer uppercase tracking-widest">
-              <option>Filter By: All Difficulties</option>
-              <option>Filter By: Level 1</option>
-              <option>Filter By: Level 2</option>
-            </select>
-          </div>
-        </div>
+      <main className="max-w-7xl mx-auto bg-slate-950 border border-slate-800 rounded-3xl p-8 shadow-2xl min-h-[600px] flex flex-col">
+          {isLoading ? (
+               <div className="flex-grow flex items-center justify-center text-slate-500 font-mono text-xs uppercase tracking-widest animate-pulse">Running Algorithmic Item Analysis...</div>
+          ) : analysisData.length === 0 ? (
+               <div className="flex-grow flex items-center justify-center text-slate-500 font-mono text-xs uppercase tracking-widest">No attempt data recorded for this assessment yet.</div>
+          ) : (
+              <div className="flex-grow overflow-y-auto custom-scrollbar">
+                  <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-900 border-b border-slate-800 sticky top-0 z-10">
+                          <tr>
+                              <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Item / Concept</th>
+                              <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] text-center">Correct Hits</th>
+                              <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] text-center">Misses (Errors)</th>
+                              <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] text-right">Difficulty Index</th>
+                          </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/50">
+                          {analysisData.map((item, idx) => {
+                              const totalAttempts = item.hits + item.misses;
+                              const difficultyRatio = totalAttempts === 0 ? 0 : Math.round((item.misses / totalAttempts) * 100);
+                              
+                              let diffStatus = 'EASY';
+                              let diffColor = 'text-emerald-400';
+                              if (difficultyRatio > 70) { diffStatus = 'CRITICAL (REVISE)'; diffColor = 'text-red-500'; }
+                              else if (difficultyRatio > 40) { diffStatus = 'MODERATE'; diffColor = 'text-amber-500'; }
 
-        {/* BREAKDOWN LIST */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-10 shadow-2xl">
-          <div className="flex justify-between items-center mb-8 border-b border-slate-800 pb-4">
-            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em]">Quiz Item Breakdown</h3>
-            <span className="text-[9px] font-black px-3 py-1.5 rounded uppercase tracking-widest bg-slate-950 border border-slate-800 text-slate-500">Live Database Tally</span>
-          </div>
-
-          <div className="space-y-6">
-            {quizData.length === 0 ? <p className="text-center font-mono text-slate-600 py-10 uppercase tracking-widest">No item data recorded in the vault.</p> : quizData.map((item, i) => {
-              const total = item.right + item.wrong;
-              const rightPercent = total > 0 ? Math.round((item.right / total) * 100) : 0;
-              const wrongPercent = total > 0 ? 100 - rightPercent : 0;
-
-              return (
-                <div key={i} className={`bg-slate-950 border ${item.review ? 'border-red-900/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]' : 'border-slate-800'} rounded-2xl p-6 md:p-8 relative`}>
-                  
-                  {/* Headers */}
-                  <div className="flex justify-between items-start mb-6">
-                    <div className="flex items-center gap-3">
-                      <span className="text-[9px] font-black px-3 py-1 rounded bg-blue-900/20 text-blue-400 border border-blue-900/50 uppercase">{item.lvl}</span>
-                      <span className="text-[10px] font-mono font-black text-slate-500 uppercase">{item.id}</span>
-                      {item.review && <span className="text-[9px] font-black px-3 py-1 rounded bg-red-600 text-white uppercase tracking-widest ml-2 animate-pulse shadow-lg shadow-red-900/50">Review Required</span>}
-                    </div>
-                    
-                    {/* Tally Numbers */}
-                    <div className="flex gap-8 text-center hidden md:flex">
-                      <div><span className="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Right</span><span className="text-xl font-black text-emerald-400">{item.right}</span></div>
-                      <div><span className="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Wrong</span><span className="text-xl font-black text-red-400">{item.wrong}</span></div>
-                    </div>
-                  </div>
-
-                  {/* Question Text */}
-                  <h4 className="text-sm md:text-base font-bold text-white mb-8 max-w-4xl leading-relaxed">{item.q}</h4>
-
-                  {/* Progress Bar Container */}
-                  <div className="w-full relative">
-                    <div className="flex h-3 rounded-full overflow-hidden bg-slate-900 mb-3 shadow-inner">
-                      <div className="bg-emerald-500 transition-all duration-1000" style={{ width: `${rightPercent}%` }}></div>
-                      <div className="bg-red-500 transition-all duration-1000" style={{ width: `${wrongPercent}%` }}></div>
-                    </div>
-                    
-                    <div className="flex justify-between">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-emerald-500">{rightPercent}% Success Rate</span>
-                      <span className="text-[10px] font-black uppercase tracking-widest text-red-500">{wrongPercent}% Fail Rate</span>
-                    </div>
-                  </div>
-
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-      </div>
+                              return (
+                                  <tr key={idx} className="hover:bg-slate-900 transition-colors">
+                                      <td className="p-4 text-white font-bold text-sm w-1/2">{item.questionText}</td>
+                                      <td className="p-4 text-center font-mono text-emerald-500">{item.hits}</td>
+                                      <td className="p-4 text-center font-mono text-red-500">{item.misses}</td>
+                                      <td className="p-4 text-right">
+                                          <div className="flex flex-col items-end">
+                                              <span className={`font-black text-lg ${diffColor}`}>{difficultyRatio}% Failure</span>
+                                              <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded border mt-1 ${
+                                                  difficultyRatio > 70 ? 'bg-red-900/30 text-red-500 border-red-900/50' :
+                                                  difficultyRatio > 40 ? 'bg-amber-900/30 text-amber-500 border-amber-900/50' :
+                                                  'bg-emerald-900/30 text-emerald-500 border-emerald-900/50'
+                                              }`}>{diffStatus}</span>
+                                          </div>
+                                      </td>
+                                  </tr>
+                              );
+                          })}
+                      </tbody>
+                  </table>
+              </div>
+          )}
+      </main>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { API_BASE_URL } from "../../apiConfig"; 
 
 export default function TicketTriage() {
   // ==========================================
@@ -20,17 +21,21 @@ export default function TicketTriage() {
     'INTERMEDIATE': []
   });
 
+  // NEW: State for tracking which tickets other admins are currently typing on
+  const [activeTyping, setActiveTyping] = useState([]);
+  const [globalWs, setGlobalWs] = useState(null);
+
   // FETCH LIVE TICKETS FROM DATABASE WITH JWT
   const fetchTickets = async () => {
     try {
       const token = localStorage.getItem('token');
       if (!token) return;
 
-      const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/tickets/active', {
+      const res = await fetch(`${API_BASE_URL}api/tickets/active`, {
           method: 'GET',
           headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}` // THE FIX: Phase 2 Security Header
+              'Authorization': `Bearer ${token}` 
           }
       });
       if (res.ok) {
@@ -44,23 +49,31 @@ export default function TicketTriage() {
     }
   };
 
-  // THE FIX: PHASE 4 WEBSOCKET LIVE SYNC
+  // ESTABLISH WEBSOCKET FOR TICKETS & TYPING
   useEffect(() => {
-    fetchTickets(); // Initial load
+    fetchTickets(); 
 
-    // 1. Establish the tunnel
-    const ws = new WebSocket('wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/stream');
+    const wsUrl = `${API_BASE_URL}api/ws/stream`.replace('https://', 'wss://').replace('http://', 'ws://');
+    const ws = new WebSocket(wsUrl);
+    setGlobalWs(ws);
     
-    // 2. Listen for the backend broadcast
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        
         if (data.event === 'TICKET_UPDATE') {
-            console.log("WebSocket Broadcast Received:", data.message);
-            fetchTickets(); // Instantly refresh the board!
+            fetchTickets(); 
+        }
+        
+        // NEW: Listen for typing indicators from other admins
+        if (data.event === 'TYPING_STATUS') {
+            if (data.isTyping && data.adminId !== userId) {
+                setActiveTyping(prev => [...new Set([...prev, data.ticketId])]);
+            } else {
+                setActiveTyping(prev => prev.filter(id => id !== data.ticketId));
+            }
         }
     };
     
-    // 3. Clean up the tunnel when the admin leaves the page
     return () => ws.close();
   }, []);
 
@@ -68,6 +81,16 @@ export default function TicketTriage() {
     setAiModal(ticket);
     setIsGenerating(true);
     setAiDraft("");
+    
+    // NEW: Broadcast to the network that this admin is now typing
+    if (globalWs && globalWs.readyState === WebSocket.OPEN) {
+        globalWs.send(JSON.stringify({
+            event: 'TYPING_STATUS',
+            ticketId: ticket.id,
+            adminId: userId,
+            isTyping: true
+        }));
+    }
     
     setTimeout(() => {
       setIsGenerating(false);
@@ -79,6 +102,19 @@ export default function TicketTriage() {
         setAiDraft(`Dear ${ticket.name},\n\nWe have received your ticket regarding: "${ticket.issue}".\n\nOur system administrators have reviewed the logs and applied a patch to correct this anomaly. Please refresh your dashboard.\n\nBest regards,\nNAAP IT Support`);
       }
     }, 1500);
+  };
+
+  const cancelResolution = () => {
+    // NEW: Broadcast to the network that this admin stopped typing
+    if (aiModal && globalWs && globalWs.readyState === WebSocket.OPEN) {
+        globalWs.send(JSON.stringify({
+            event: 'TYPING_STATUS',
+            ticketId: aiModal.id,
+            adminId: userId,
+            isTyping: false
+        }));
+    }
+    setAiModal(null);
   };
 
   const confirmAndSend = async () => {
@@ -101,11 +137,11 @@ export default function TicketTriage() {
             clearance_level: currentClearanceLevel
         };
 
-        const res = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/tickets/resolve/${aiModal.id}`, {
+        const res = await fetch(`${API_BASE_URL}api/tickets/resolve/${aiModal.id}`, {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}` // THE FIX: Phase 2 Security Header
+                'Authorization': `Bearer ${token}` 
             },
             body: JSON.stringify(payload)
         });
@@ -116,7 +152,7 @@ export default function TicketTriage() {
             } else {
                 alert("Resolution logged. Email dispatched via backend SMTP.");
             }
-            setAiModal(null);
+            cancelResolution(); // This clears the modal AND sends the "stopped typing" broadcast
             fetchTickets(); 
         } else {
             alert("Failed to process ticket resolution on the server.");
@@ -160,7 +196,7 @@ export default function TicketTriage() {
             )}
 
             <div className="flex gap-4 mt-auto">
-              <button onClick={() => setAiModal(null)} disabled={isExecuting} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-black py-4 rounded-xl uppercase tracking-widest text-xs transition-colors border border-slate-600 disabled:opacity-50">Cancel</button>
+              <button onClick={cancelResolution} disabled={isExecuting} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-black py-4 rounded-xl uppercase tracking-widest text-xs transition-colors border border-slate-600 disabled:opacity-50">Cancel</button>
               
               <button 
                 onClick={confirmAndSend} 
@@ -194,11 +230,22 @@ export default function TicketTriage() {
                 <div className="text-center py-8"><p className="text-[10px] text-slate-600 uppercase tracking-widest font-mono">No active tickets.</p></div>
             )}
             {list.map(ticket => (
-              <div key={ticket.id} className="bg-slate-900 border border-slate-700 p-5 rounded-2xl group transition-colors flex flex-col">
+              <div key={ticket.id} className="bg-slate-900 border border-slate-700 p-5 rounded-2xl group transition-colors flex flex-col relative overflow-hidden">
+                
+                {/* NEW: Ghost Typing Indicator overlay */}
+                {activeTyping.includes(ticket.id) && (
+                  <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-600 via-blue-400 to-blue-600 animate-[pulse_2s_ease-in-out_infinite]" />
+                )}
+
                 <div className="flex justify-between items-start mb-3">
-                  <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded border ${ticket.type === 'STUDENT' ? 'bg-emerald-900/30 text-emerald-400 border-emerald-900/50' : 'bg-purple-900/30 text-purple-400 border-purple-900/50'}`}>{ticket.type}</span>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded border ${ticket.type === 'STUDENT' ? 'bg-emerald-900/30 text-emerald-400 border-emerald-900/50' : 'bg-purple-900/30 text-purple-400 border-purple-900/50'}`}>{ticket.type}</span>
+                    {/* NEW: Text indicator for typing */}
+                    {activeTyping.includes(ticket.id) && <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest animate-pulse ml-2">Admin is typing...</span>}
+                  </div>
                   <span className="text-[9px] font-mono text-slate-500">{ticket.time}</span>
                 </div>
+                
                 <p className="text-sm font-bold text-white mb-1 leading-snug">{ticket.issue}</p>
                 <div className="mt-4 bg-slate-950 p-3 rounded-xl border border-slate-800">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{ticket.name} <span className="font-mono ml-1">[{ticket.idNumber}]</span></p>
@@ -206,8 +253,12 @@ export default function TicketTriage() {
                   <p className="text-[9px] font-mono text-slate-600 mt-1">Class: {ticket.yearSec}</p>
                 </div>
                 
-                <button onClick={() => triggerAIResolve(ticket)} className="w-full mt-4 bg-slate-800 hover:bg-blue-600 text-blue-400 hover:text-white font-black py-3 rounded-xl text-[9px] uppercase tracking-widest transition-colors flex justify-center items-center gap-2">
-                  <span>✨</span> {currentClearanceLevel === 3 ? 'Draft AI Response' : '1-Click AI Resolve'}
+                <button 
+                  onClick={() => triggerAIResolve(ticket)} 
+                  disabled={activeTyping.includes(ticket.id)} // NEW: Disable button if someone else is typing
+                  className="w-full mt-4 bg-slate-800 hover:bg-blue-600 text-blue-400 hover:text-white font-black py-3 rounded-xl text-[9px] uppercase tracking-widest transition-colors flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span>✨</span> {activeTyping.includes(ticket.id) ? 'Locked: Being Resolved' : (currentClearanceLevel === 3 ? 'Draft AI Response' : '1-Click AI Resolve')}
                 </button>
               </div>
             ))}

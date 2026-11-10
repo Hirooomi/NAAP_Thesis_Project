@@ -5,6 +5,7 @@ import json
 import chromadb
 import random
 import time
+import uuid # THE FIX: Imported uuid to generate entropy seeds
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,7 +13,11 @@ load_dotenv()
 # ========================================================
 # CHROMADB VECTOR DATABASE INITIALIZATION
 # ========================================================
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+# THE FIX: Lock ChromaDB to an absolute directory path to ensure permanent AI memory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHROMA_PATH = os.path.join(BASE_DIR, "chroma_db")
+
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 rag_collection = chroma_client.get_or_create_collection(name="naap_modules")
 pattern_collection = chroma_client.get_or_create_collection(name="prof_patterns")
 
@@ -47,7 +52,9 @@ def call_gemini(prompt, max_retries=4):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "responseMimeType": "application/json"
+                "responseMimeType": "application/json",
+                # THE FIX: Increase temperature to allow for more creative, varied factual recall
+                "temperature": 0.8
             }
         }
         data = json.dumps(payload).encode('utf-8')
@@ -90,7 +97,6 @@ def ingest_into_rag(text, module_title):
         rag_collection.upsert(documents=chunks, metadatas=metadatas, ids=ids)
         print(f"[RAG ENGINE]: Successfully embedded {len(chunks)} chunks for {module_title}")
 
-# THE FIX: Added function to permanently purge ghost data from ChromaDB
 def delete_rag_vectors_by_title(module_title):
     try:
         rag_collection.delete(where={"title": module_title})
@@ -99,30 +105,44 @@ def delete_rag_vectors_by_title(module_title):
         print(f"[RAG ENGINE ERROR]: Failed to purge ghost vectors: {e}")
 
 def query_rag_engine(query_string):
-    if rag_collection.count() == 0:
-        return {"summary": "The CAAP Database is currently empty.", "sources": []}
-
-    search_results = rag_collection.query(query_texts=[query_string], n_results=3)
-    docs = search_results["documents"][0] if search_results["documents"] else []
-    metadatas = search_results["metadatas"][0] if search_results["metadatas"] else []
-
-    if not docs:
-        return {"summary": "No relevant information found.", "sources": []}
+    docs = []
+    metadatas = []
+    if rag_collection.count() > 0:
+        search_results = rag_collection.query(query_texts=[query_string], n_results=3)
+        docs = search_results["documents"][0] if search_results["documents"] else []
+        metadatas = search_results["metadatas"][0] if search_results["metadatas"] else []
 
     context_blocks = "\n\n".join([f"Source: {meta['title']}\nContent: {doc}" for doc, meta in zip(docs, metadatas)])
+    
+    # THE FIX: Added Rule #3 explicitly forcing the AI to drop irrelevant sources
     prompt = f"""
-    You are the NAAP AMT AI Assistant. Answer the user's query using ONLY the provided Source Excerpts.
+    You are the NAAP AMT AI Assistant.
+    
+    CRITICAL GUARDRAILS (VIOLATION RESULTS IN IMMEDIATE SYSTEM FAILURE):
+    1. STRICT AVIATION DOMAIN ONLY: You may ONLY answer questions related to aviation, aircraft maintenance, aerodynamics, physics of flight, or engineering. If the user asks outside this domain, reply EXACTLY with: "Domain Protocol: I am restricted to answering questions strictly related to aviation and aircraft maintenance."
+    2. ANTI-CHEATING: Do not give direct answers to exam-style questions.
+    3. SOURCE RELEVANCE INTEGRITY: You are provided with 'Source Excerpts' below. Evaluate them carefully.
+       - IF the excerpts contain the answer: Use them and put their titles/snippets in the 'sources' JSON array.
+       - IF the excerpts DO NOT contain the answer: You may answer using your general aviation knowledge, BUT you MUST return an empty array [] for the 'sources' field. Do NOT list sources that did not actually provide the answer.
+    4. EXPLICIT MODULE REQUESTS: If the user specifically asks "Give me modules related to this", check the Source Excerpts. If the excerpts match the topic, list them. If they are irrelevant or empty, state EXACTLY: "There are currently no relevant modules in the database for this specific topic," and return [] for 'sources'.
+    
     User Query: "{query_string}"
-    Source Excerpts: {context_blocks}
-    OUTPUT JSON FORMAT:
+    Source Excerpts: 
+    {context_blocks}
+    
+    OUTPUT STRICT JSON FORMAT:
     {{
-        "summary": "Your detailed answer...",
-        "sources": [{{"title": "Source Title", "content": "1-sentence snippet"}}]
+        "summary": "Your detailed answer or refusal...",
+        "sources": [{{"title": "Exact Source Title", "content": "1-sentence snippet"}}]
     }}
     """
     res = call_gemini(prompt)
+    
+    # Failsafe: Wipe sources if the AI refused the question
+    if res and "Domain Protocol" in res.get("summary", ""):
+        res["sources"] = []
+        
     return res if (res and "summary" in res) else {"summary": "Error answering query.", "sources": []}
-
 # ========================================================
 # PHASE 1 & 3: VALIDATION & MODULE EXTRACTION
 # ========================================================
@@ -225,6 +245,9 @@ def generate_bulk_quiz(context, level, topic=None, count=10, max_choices=4, user
         if custom_pattern:
             style_injection = f"CRITICAL STYLE OVERRIDE: Generate questions strictly mimicking this professor's specific NLP profile: {custom_pattern}"
 
+    # THE FIX: Injected an entropy seed to guarantee uniqueness on every generation click
+    entropy_seed = uuid.uuid4().hex
+
     prompt = f"""
     You are an expert CAAP Aviation Instructor.
     Generate a complete batch of EXACTLY {count} aviation multiple-choice questions based ONLY on this text.
@@ -233,14 +256,16 @@ def generate_bulk_quiz(context, level, topic=None, count=10, max_choices=4, user
     
     Level Target: {level}
     Style Baseline: {difficulty}
+    Entropy Seed: {entropy_seed}
     
     TEXT: 
     {context[:2500000]} 
     
     CRITICAL RULES FOR MCQ OPTIONS:
-    - Output exactly {count} questions.
+    - Output exactly {count} UNIQUE questions. Do not repeat questions you have generated previously.
     - 'options' must be an array of EXACTLY {max_choices} strings.
     - DO NOT include prefixes like "A) " or "B. ". Return only the raw text of the choice.
+    - THE CORRECT ANSWER MUST BE SHUFFLED RANDOMLY ACROSS THE ARRAY. Do NOT always place the correct answer as the first option.
     - Include logic tricks occasionally for the last option, such as "None of the above" or "Both first and second options".
     - 'ans' must be the EXACT full string of the correct choice (no letter prefixes).
     
@@ -275,15 +300,19 @@ def generate_single_question(context, q_type, level, topic=None, max_choices=4, 
         options_instruction = f"""
         - 'options' must be an array of EXACTLY {max_choices} strings.
         - DO NOT prefix with A, B, C. Return raw text only.
+        - STRICT RULE: RANDOMLY SHUFFLE the correct answer within the options array. Do not default to the first slot.
         - 'ans' must be the exact raw string.
         """
     else:
         options_instruction = "- 'options' should be an empty array []. - 'ans' must be the exact word/phrase."
 
+    entropy_seed = uuid.uuid4().hex
+
     prompt = f"""
-    Generate exactly ONE '{q_type}' question for an aviation exam.
+    Generate exactly ONE highly unique '{q_type}' question for an aviation exam.
     Level: {level}. {topic_focus}
     {style_injection}
+    Entropy Seed: {entropy_seed}
     Base it solely on this source text: {context[:2500000]} 
     
     CRITICAL: 
@@ -351,9 +380,11 @@ def clone_specific_question(context, level, topic, ref_question):
     options_instruction = ""
     if q_type == "MCQ":
         if max_choices == 0: max_choices = 4 
-        options_instruction = f"- 'options' must be an array of EXACTLY {max_choices} strings without letter prefixes."
+        options_instruction = f"- 'options' must be an array of EXACTLY {max_choices} strings without letter prefixes. STRICT RULE: RANDOMLY SHUFFLE the correct answer within the options array. Do not default to the first slot."
     else:
         options_instruction = "- 'options' should be an empty array []."
+
+    entropy_seed = uuid.uuid4().hex
 
     prompt = f"""
     You are an expert CAAP Aviation Instructor. 
@@ -361,10 +392,11 @@ def clone_specific_question(context, level, topic, ref_question):
     {json.dumps(ref_question)}
     
     TASK: Analyze the logic, style, difficulty, and structural pattern of the reference question above.
-    Using the provided source TEXT below, generate a BRAND NEW, unique question that strictly mimics the structural pattern of the reference question. Do NOT copy the exact text, just the "flavor" and logic mechanism.
+    Using the provided source TEXT below, generate a BRAND NEW, highly unique question that strictly mimics the structural pattern of the reference question. Do NOT copy the exact text, just the "flavor" and logic mechanism.
     
     TEXT: {context[:2500000]}
     
+    Entropy Seed: {entropy_seed}
     Level: {level}. Topic: {topic}.
     CRITICAL: {options_instruction}
 
@@ -509,3 +541,36 @@ def evaluate_score_dispute(issue_text):
         "points_to_add": 0, 
         "email_draft": "Your dispute could not be automatically verified by the AI. It has been escalated to the Faculty for manual review."
     }
+
+# ========================================================
+# NEW: AI FLASHCARD GENERATOR
+# ========================================================
+def generate_flashcards(topic_string: str):
+    # 1. Search the RAG Database for accurate module context
+    context = ""
+    if rag_collection.count() > 0:
+        search_results = rag_collection.query(query_texts=[topic_string], n_results=2)
+        if search_results["documents"]:
+            context = "\n".join(search_results["documents"][0])
+
+    # 2. Instruct the AI to build the deck
+    prompt = f"""
+    You are an elite Aviation Maintenance Instructor.
+    Based on the topic "{topic_string}" and the following context (if available), generate exactly 10 high-yield study flashcards. 
+    Keep the front (question/term) short, and the back (answer/definition) concise but highly informative for an exam.
+    
+    Context: {context}
+    
+    OUTPUT STRICT JSON FORMAT ONLY:
+    {{
+        "cards": [
+            {{"front": "Question or Term here", "back": "Answer or Definition here"}}
+        ]
+    }}
+    """
+    
+    res = call_gemini(prompt)
+    if res and "cards" in res:
+        return {"status": "success", "cards": res["cards"]}
+    else:
+        return {"status": "error", "message": "Failed to generate AI flashcards."}

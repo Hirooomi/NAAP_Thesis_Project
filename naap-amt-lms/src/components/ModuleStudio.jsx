@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
 
 export default function ModuleStudio({
   moduleTitle, isSplitScreen, setIsSplitScreen, uploadAsIs, canvaMenu, setCanvaMenu, 
@@ -13,6 +16,42 @@ export default function ModuleStudio({
 }) {
 
   const [extractingSection, setExtractingSection] = useState(null);
+  
+  const profName = localStorage.getItem('profName') || "ALONZO, Eduardo";
+
+  // ==========================================
+  // WEBSOCKET FILE LOCK EMITTER
+  // ==========================================
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token || !targetSubFolder) return;
+
+    const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace('https://', 'wss://').replace('http://', 'ws://');
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+       // Instantly broadcast that this file is locked by this professor
+       ws.send(JSON.stringify({
+          event: 'FILE_LOCK_STATUS',
+          topic: targetSubFolder,
+          isLocked: true,
+          profName: profName
+       }));
+    };
+
+    return () => {
+       // Release the lock network-wide when the component unmounts
+       if (ws.readyState === WebSocket.OPEN) {
+           ws.send(JSON.stringify({
+              event: 'FILE_LOCK_STATUS',
+              topic: targetSubFolder,
+              isLocked: false,
+              profName: profName
+           }));
+       }
+       ws.close();
+    };
+  }, [targetSubFolder, profName]);
 
   const safeInsertText = (rawText) => {
     const editor = document.getElementById('module-paper-editor');
@@ -50,14 +89,14 @@ export default function ModuleStudio({
         section_type: sectionType 
       };
 
-      // THE FIX: Retrieve the token from Local Storage
       const token = localStorage.getItem('token');
 
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/paraphrase-topic', {
+      // SYNCED TO API_BASE_URL
+      const response = await fetch(`${API_BASE_URL}api/modules/paraphrase-topic`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}` // THE FIX: Inject the Security Header
+            'Authorization': `Bearer ${token}` 
         },
         body: JSON.stringify(payload)
       });

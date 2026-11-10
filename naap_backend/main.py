@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import json
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -8,7 +9,6 @@ from sqlalchemy.sql import func
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import fitz
-import json
 import docx
 from pptx import Presentation
 
@@ -24,9 +24,14 @@ from routes import comms, ui_editor, tickets, users, vault, analytics, auth
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="NAAP AMT Sentinel Server")
 
+# THE FIX: Updated CORS Policy to prevent crashes and allow dynamic Dev Tunnels
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "http://localhost:5173", 
+        "http://127.0.0.1:5173",
+        "https://9j6zh67b-5173.asse.devtunnels.ms" # Add your exact frontend tunnel URL here
+    ], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,7 +56,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     if is_authorized:
         try:
             while True:
-                await websocket.receive_text()
+                # THE FIX: Explicitly parse incoming messages to respond to heartbeats
+                data = await websocket.receive_text()
+                try:
+                    payload = json.loads(data)
+                    if payload.get("event") == "ping":
+                        # Send pong back to Dev Tunnel to prevent idle disconnects
+                        await websocket.send_json({"event": "pong"})
+                    elif payload.get("event") == "NEW_TELEMETRY":
+                        # Broadcast telemetry to all connected professors/admins
+                        await manager.broadcast(payload)
+                except json.JSONDecodeError:
+                    pass
         except WebSocketDisconnect:
             manager.disconnect(websocket)
 
@@ -94,6 +110,10 @@ class CloneQuestionRequest(BaseModel):
 class SyncPatternRequest(BaseModel):
     user_id: str
     questions: List[Dict[str, Any]]
+
+# NEW: Flashcard Schema
+class FlashcardRequest(BaseModel):
+    topic: str
 
 # ==========================================
 # ENDPOINTS (NOW SECURED WITH RBAC)
@@ -214,6 +234,22 @@ def sync_pattern(req: SyncPatternRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=result.get("message", "Failed to sync professor pattern."))
     
     return result
+
+# NEW: Flashcards API Endpoint
+@app.post("/api/modules/flashcards", dependencies=[Depends(require_role(["STUDENT", "FACULTY", "ADMIN", "HEAD_ADMIN"]))])
+def generate_ai_flashcards(req: FlashcardRequest):
+    result = ai_engine.generate_flashcards(req.topic)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
+
+# THE FIX: Moved the shutdown endpoint above the uvicorn run command
+@app.post("/api/ws/trigger-shutdown", dependencies=[Depends(require_role(["HEAD_ADMIN"]))])
+async def trigger_shutdown():
+    """Broadcasts a global shutdown signal to all connected dashboards."""
+    await manager.broadcast({"event": "SYSTEM_SHUTDOWN"})
+    return {"status": "success", "message": "Global shutdown initiated."}
+
 
 if __name__ == "__main__":
     import uvicorn

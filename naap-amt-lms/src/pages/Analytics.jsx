@@ -1,73 +1,105 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { API_BASE_URL } from '../apiConfig';
 
 export default function Analytics() {
   const navigate = useNavigate();
-  const studentId = localStorage.getItem('userId');
+  const studentId = sessionStorage.getItem('userId');
   
   const [displayRows, setDisplayRows] = useState([]);
   const [expandedRow, setExpandedRow] = useState(null); 
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchStudentTelemetry = async () => {
-      if (!studentId) return;
-      try {
-        const token = localStorage.getItem('token'); // Grab the token
-        const res = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/analytics/student/${studentId}`, {
-          // INJECT THE HEADER HERE
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        
-        if (res.ok) {
-          const data = await res.json();
-          const logs = data.logs || [];
-          
-          const topics = [...new Set(logs.map(l => l.topic))];
-          const rolledUpData = [];
-
-          topics.forEach(topic => {
-            const topicLogs = logs.filter(l => l.topic === topic);
-            
-            const lvl1Pre = topicLogs.find(l => l.baseLevel === 'Lvl 1' && l.type === 'Pre');
-            const lvl1Post = topicLogs.filter(l => l.baseLevel === 'Lvl 1' && l.type === 'Post')[0];
-            const lvl2Pre = topicLogs.find(l => l.baseLevel === 'Lvl 2' && l.type === 'Pre');
-            const lvl2Post = topicLogs.filter(l => l.baseLevel === 'Lvl 2' && l.type === 'Post')[0];
-            const caap = topicLogs.filter(l => l.baseLevel === 'CAAP')[0];
-
-            let currentLevel = 'Lvl 1: Easy';
-            let preScore = lvl1Pre ? lvl1Pre.score : '--';
-            let postScore = lvl1Post ? lvl1Post.score : '--';
-            let status = lvl1Post ? (lvl1Post.score >= 75 ? 'PASSED' : 'FAILED') : (lvl1Pre ? 'PENDING' : '--');
-
-            if (lvl1Post && lvl1Post.score >= 75) {
-              currentLevel = 'Lvl 2: Advanced';
-              preScore = lvl2Pre ? lvl2Pre.score : '--';
-              postScore = lvl2Post ? lvl2Post.score : '--';
-              status = lvl2Post ? (lvl2Post.score >= 75 ? 'PASSED' : 'FAILED') : (lvl2Pre ? 'PENDING' : 'UNLOCKED');
-
-              if (lvl2Post && lvl2Post.score >= 75) {
-                currentLevel = 'CAAP Exam Readiness';
-                preScore = '--'; 
-                postScore = caap ? caap.score : '--';
-                status = caap ? (caap.score >= 75 ? 'PASSED' : 'FAILED') : 'UNLOCKED';
-              }
-            }
-
-            rolledUpData.push({ topic, level: currentLevel, pre: preScore, post: postScore, status });
-          });
-
-          setDisplayRows(rolledUpData);
-        }
-      } catch (err) {
-        console.error("Failed to fetch student analytics");
-      } finally {
+  const fetchStudentTelemetry = async () => {
+    if (!studentId) {
         setIsLoading(false);
+        return;
+    }
+    
+    // THE FIX: Add a 10-second timeout controller so it never hangs indefinitely
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+      const token = sessionStorage.getItem('token');
+      const res = await fetch(`${API_BASE_URL}api/analytics/student/${studentId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const logs = data.logs || [];
+        
+        const topics = [...new Set(logs.map(l => l.topic))];
+        const rolledUpData = [];
+
+        topics.forEach(topic => {
+          const topicLogs = logs.filter(l => l.topic === topic);
+          
+          const lvl1Pre = topicLogs.find(l => l.baseLevel === 'Lvl 1' && l.type === 'Pre');
+          const lvl1Post = topicLogs.filter(l => l.baseLevel === 'Lvl 1' && l.type === 'Post')[0];
+          const lvl2Pre = topicLogs.find(l => l.baseLevel === 'Lvl 2' && l.type === 'Pre');
+          const lvl2Post = topicLogs.filter(l => l.baseLevel === 'Lvl 2' && l.type === 'Post')[0];
+          const caap = topicLogs.filter(l => l.baseLevel === 'CAAP')[0];
+
+          let currentLevel = 'Lvl 1: Easy';
+          let preScore = lvl1Pre ? lvl1Pre.score : '--';
+          let postScore = lvl1Post ? lvl1Post.score : '--';
+          let status = lvl1Post ? (lvl1Post.score >= 75 ? 'PASSED' : 'FAILED') : (lvl1Pre ? 'PENDING' : '--');
+
+          if (lvl1Post && lvl1Post.score >= 75) {
+            currentLevel = 'Lvl 2: Advanced';
+            preScore = lvl2Pre ? lvl2Pre.score : '--';
+            postScore = lvl2Post ? lvl2Post.score : '--';
+            status = lvl2Post ? (lvl2Post.score >= 75 ? 'PASSED' : 'FAILED') : (lvl2Pre ? 'PENDING' : 'UNLOCKED');
+
+            if (lvl2Post && lvl2Post.score >= 75) {
+              currentLevel = 'CAAP Exam Readiness';
+              preScore = '--'; 
+              postScore = caap ? caap.score : '--';
+              status = caap ? (caap.score >= 75 ? 'PASSED' : 'FAILED') : 'UNLOCKED';
+            }
+          }
+
+          rolledUpData.push({ topic, level: currentLevel, pre: preScore, post: postScore, status });
+        });
+
+        setDisplayRows(rolledUpData);
       }
-    };
+    } catch (err) {
+      console.error("Failed to fetch student analytics:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
     fetchStudentTelemetry();
+    
+    const token = sessionStorage.getItem('token');
+    if (!token) return;
+
+    const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace('https://', 'wss://').replace('http://', 'ws://');
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.event === "NEW_TELEMETRY" || data.event === "QUIZ_COMPLETED") {
+                console.log("[WS] Assessment finalized. Syncing scorecard matrix...");
+                fetchStudentTelemetry();
+            }
+        } catch (e) {
+            console.error("WS Parse Error", e);
+        }
+    };
+
+    return () => ws.close();
   }, [studentId]);
 
   const handleReviewClick = (topic) => {

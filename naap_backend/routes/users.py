@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -10,17 +10,19 @@ import io
 import random
 import string
 
-from dependencies import get_current_user, require_role # INJECT DEPENDENCIES
+from dependencies import get_current_user, require_role
 import models
 import security
 import email_service
 import ai_engine 
 from database import get_db
 
+from socket_manager import manager
+
 router = APIRouter(prefix="/api/users", tags=["User Architect"])
 
 # ==========================================
-# PYDANTIC SCHEMAS (MOVED TO TOP TO FIX SYNTAX ERROR)
+# PYDANTIC SCHEMAS
 # ==========================================
 class UserCreateRequest(BaseModel):
     role: str
@@ -57,6 +59,12 @@ class FinalizeRejectionRequest(BaseModel):
     student_email: str
     email_body: str
 
+class UpdateSectionRequest(BaseModel):
+    section: str
+
+class UpdateSubjectsRequest(BaseModel):
+    subjects: str
+
 def generate_temp_password():
     chars = string.ascii_uppercase + string.digits
     random_str = ''.join(random.choice(chars) for _ in range(6))
@@ -69,8 +77,6 @@ def generate_temp_password():
 @router.get("/roster", dependencies=[Depends(require_role(["ADMIN", "FACULTY", "HEAD_ADMIN"]))])
 def get_rosters(db: Session = Depends(get_db)):
     try:
-        # THE FIX: Remove the strict .filter(models.User.is_active == True)
-        # This ensures all accounts (even those with NULL active states) render in the Architect.
         users = db.query(models.User).all()
         admins = []
         profs = []
@@ -81,14 +87,44 @@ def get_rosters(db: Session = Depends(get_db)):
                 admins.append({"id": u.id, "name": f"{u.first_name} {u.last_name}", "email": u.email, "level": u.admin_clearance})
             elif u.role == "FACULTY":
                 profs.append({"id": u.id, "name": f"{u.first_name} {u.last_name}", "email": u.email, "honorific": u.honorific, "suffix": u.suffix, "subjects": u.subjects})
-            elif u.role == "STUDENT":
-                students.append({"id": u.id, "name": f"{u.last_name}, {u.first_name}", "email": u.email, "year": u.year_level, "section": u.section})
+            elif u.role in ["STUDENT", "TESTER", "ALUMNI"]:
+                students.append({"id": u.id, "name": f"{u.last_name}, {u.first_name}", "email": u.email, "year": u.year_level, "section": u.section, "role": u.role})
 
         return {"status": "success", "admins": admins, "profs": profs, "students": students}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))     
+
+@router.get("/pending", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def get_pending_requests(db: Session = Depends(get_db)):
+    try:
+        reqs = db.query(models.PendingApproval).filter(models.PendingApproval.entity_type.like("NEW_%")).all()
+        formatted = []
+        for r in reqs:
+            data = json.loads(r.payload_data)
+            
+            uid = data.get('user_id', 'UNKNOWN_ID')
+            email = data.get('email', 'NO_EMAIL')
+            yr = data.get('year_level', '')
+            sec = data.get('section', '')
+            
+            spec_details = f"ID: {uid} | {email}"
+            if yr and sec:
+                spec_details += f" | {yr}, {sec}"
+
+            formatted.append({
+                "id": r.id,
+                "type": r.entity_type.replace('_', ' '),
+                "name": f"{data.get('first_name')} {data.get('last_name')}",
+                "spec": spec_details,
+                "email": email, 
+                "requestedBy": r.requested_by
+            })
+        return {"status": "success", "pending": formatted}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/create", dependencies=[Depends(require_role(["ADMIN"]))])
-def create_user(req: UserCreateRequest, db: Session = Depends(get_db)):
+def create_user(req: UserCreateRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     existing = db.query(models.User).filter((models.User.email == req.email) | (models.User.id == req.user_id)).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email or ID already exists.")
@@ -122,62 +158,45 @@ def create_user(req: UserCreateRequest, db: Session = Depends(get_db)):
     else:
         email_body = f"Welcome {req.first_name}.\n\nYour account has been provisioned.\nYour Login ID is: {req.user_id}\nYour temporary password is: {temp_pass}\n\nSECURITY PROTOCOL: This temporary password will expire in 1 hour. Please log in immediately to secure your account and set a permanent password."
 
-    email_status = "sent"
+    background_tasks.add_task(
+        email_service.dispatch_global_announcement,
+        header="NAAP AMT: Your Account Has Been Provisioned",
+        message=email_body,
+        severity="LOW",
+        recipient_emails=[req.email]
+    )
+
+    return {"status": "success", "message": "User created successfully. Email dispatching in background.", "temporary_password": temp_pass}
+
+@router.delete("/purge/{user_id}", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def purge_user(
+    user_id: str, 
+    admin_id: str = Query("SYSTEM"),
+    reason: str = Query("No reason provided"),
+    db: Session = Depends(get_db)
+):
     try:
-        email_service.dispatch_global_announcement(
-            header="NAAP AMT: Your Account Has Been Provisioned",
-            message=email_body,
-            severity="LOW",
-            recipient_emails=[req.email]
+        new_log = models.AuditLog(
+            action="ACCOUNT_PURGED",
+            target_id=user_id,
+            performed_by=admin_id,
+            reason=reason
         )
-    except Exception as e:
-        email_status = "failed"
+        db.add(new_log)
 
-    return {"status": "success", "message": f"User created successfully. Email status: {email_status}.", "temporary_password": temp_pass}
-
-@router.delete("/purge/{user_id}", dependencies=[Depends(require_role(["ADMIN"]))])
-def purge_user(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user: raise HTTPException(status_code=404, detail="User not found")
-    try:
-        db.delete(user)
+        rows_deleted = db.query(models.User).filter(models.User.id == user_id).delete(synchronize_session=False)
+        
+        if rows_deleted == 0: 
+            raise HTTPException(status_code=404, detail="User not found")
+        
         db.commit()
         return {"status": "success"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/pending", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
-def get_pending_requests(db: Session = Depends(get_db)):
-    try:
-        reqs = db.query(models.PendingApproval).filter(models.PendingApproval.entity_type.like("NEW_%")).all()
-        formatted = []
-        for r in reqs:
-            data = json.loads(r.payload_data)
-            
-            uid = data.get('user_id', 'UNKNOWN_ID')
-            email = data.get('email', 'NO_EMAIL')
-            yr = data.get('year_level', '')
-            sec = data.get('section', '')
-            
-            spec_details = f"ID: {uid} | {email}"
-            if yr and sec:
-                spec_details += f" | {yr}, {sec}"
-
-            formatted.append({
-                "id": r.id,
-                "type": r.entity_type.replace('_', ' '),
-                "name": f"{data.get('first_name')} {data.get('last_name')}",
-                "spec": spec_details,
-                "email": email, 
-                "requestedBy": r.requested_by
-            })
-        return {"status": "success", "pending": formatted}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/approve/{req_id}", dependencies=[Depends(require_role(["ADMIN"]))])
-def approve_request(req_id: str, db: Session = Depends(get_db)):
+def approve_request(req_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     pending = db.query(models.PendingApproval).filter(models.PendingApproval.id == req_id).first()
     if not pending: raise HTTPException(status_code=404, detail="Request not found.")
     
@@ -211,18 +230,37 @@ def approve_request(req_id: str, db: Session = Depends(get_db)):
     else:
         email_body = f"Welcome {data.get('first_name')}.\n\nYour account has been authorized and provisioned.\nYour Login ID is: {data.get('user_id')}\nYour temporary password is: {temp_pass}\n\nSECURITY PROTOCOL: This temporary password will expire in 1 hour. Please log in immediately to secure your account and set a permanent password."
 
-    email_status = "sent"
-    try:
-        email_service.dispatch_global_announcement(
-            header="NAAP AMT: Your Account Has Been Provisioned",
-            message=email_body,
-            severity="LOW",
-            recipient_emails=[data.get('email')]
-        )
-    except Exception as e:
-        email_status = "failed"
+    background_tasks.add_task(
+        email_service.dispatch_global_announcement,
+        header="NAAP AMT: Your Account Has Been Provisioned",
+        message=email_body,
+        severity="LOW",
+        recipient_emails=[data.get('email')]
+    )
 
-    return {"status": "success", "message": f"Request approved and account provisioned. Email status: {email_status}.", "temporary_password": temp_pass}
+    return {"status": "success", "message": "Request approved and account provisioned.", "temporary_password": temp_pass}
+
+@router.post("/resend-passcode/{user_id}", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def resend_passcode(user_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    temp_pass = generate_temp_password()
+    user.hashed_password = security.get_password_hash(temp_pass)
+    db.commit()
+
+    email_body = f"Hello {user.first_name}.\n\nAn administrator has reset your account password.\nYour Login ID is: {user.id}\nYour new temporary password is: {temp_pass}\n\nSECURITY PROTOCOL: Please log in immediately to secure your account and set a permanent password."
+
+    background_tasks.add_task(
+        email_service.dispatch_global_announcement,
+        header="NAAP AMT: Administrator Password Reset",
+        message=email_body,
+        severity="URGENT",
+        recipient_emails=[user.email]
+    )
+
+    return {"status": "success", "message": f"New passcode dispatched to {user.email}."}
 
 @router.delete("/reject/{req_id}", dependencies=[Depends(require_role(["ADMIN"]))])
 def reject_request(req_id: str, db: Session = Depends(get_db)):
@@ -250,14 +288,15 @@ def draft_rejection(req: AIRejectionDraftRequest):
     return {"status": "success", "draft": result.get("draft")}
 
 @router.post("/finalize-rejection/{req_id}", dependencies=[Depends(require_role(["ADMIN"]))])
-def finalize_rejection(req_id: str, req: FinalizeRejectionRequest, db: Session = Depends(get_db)):
+def finalize_rejection(req_id: str, req: FinalizeRejectionRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Dispatches the AI email and permanently purges the request"""
     pending = db.query(models.PendingApproval).filter(models.PendingApproval.id == req_id).first()
     if not pending:
         raise HTTPException(status_code=404, detail="Request not found or already deleted.")
     
     try:
-        email_service.dispatch_global_announcement(
+        background_tasks.add_task(
+            email_service.dispatch_global_announcement,
             header="NAAP AMT: Account Registration Status",
             message=req.email_body,
             severity="MODERATE",
@@ -265,7 +304,7 @@ def finalize_rejection(req_id: str, req: FinalizeRejectionRequest, db: Session =
         )
         db.delete(pending)
         db.commit()
-        return {"status": "success", "message": "Rejection letter sent and request purged."}
+        return {"status": "success", "message": "Rejection letter queued and request purged."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to dispatch rejection: {str(e)}")
@@ -301,7 +340,6 @@ async def bulk_import_whitelist(file: UploadFile = File(...), db: Session = Depe
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ==========================================
 # UNPROTECTED PUBLIC ROUTES (REGISTRATION)
 # ==========================================
@@ -324,7 +362,7 @@ def request_create_user(req: UserCreateRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/unified-register")
-def unified_registration(req: UnifiedRegisterRequest, db: Session = Depends(get_db)):
+def unified_registration(req: UnifiedRegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     existing_user = db.query(models.User).filter(models.User.email == req.email).first()
     if existing_user: raise HTTPException(status_code=400, detail="Email is already in use.")
 
@@ -353,14 +391,14 @@ def unified_registration(req: UnifiedRegisterRequest, db: Session = Depends(get_
             db.commit()
 
             email_body = f"Welcome {whitelist_entry.first_name}.\n\nYour account has been instantly provisioned via the Registrar Whitelist.\nYour Login ID is: {req.student_id}\nYour temporary password is: {temp_pass}\n\nSECURITY PROTOCOL: This temporary password will expire in 1 hour. Please log in immediately to secure your account and set a permanent password."
-            try:
-                email_service.dispatch_global_announcement(
-                    header="NAAP AMT: Your Account Has Been Provisioned",
-                    message=email_body,
-                    severity="LOW",
-                    recipient_emails=[req.email]
-                )
-            except Exception: pass
+            
+            background_tasks.add_task(
+                email_service.dispatch_global_announcement,
+                header="NAAP AMT: Your Account Has Been Provisioned",
+                message=email_body,
+                severity="LOW",
+                recipient_emails=[req.email]
+            )
             
             return {"status": "success", "message": "Account auto-provisioned."}
         
@@ -392,3 +430,87 @@ def unified_registration(req: UnifiedRegisterRequest, db: Session = Depends(get_
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# NEW: COHORT & ROSTER INLINE CONTROLS
+# ==========================================
+
+@router.post("/batch-promote", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def batch_promote_students(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    try:
+        students = db.query(models.User).filter(models.User.role == "STUDENT").all()
+        for student in students:
+            if student.year_level == "1st Year":
+                student.year_level = "2nd Year"
+            elif student.year_level == "2nd Year":
+                student.year_level = "3rd Year"
+            elif student.year_level == "3rd Year":
+                student.year_level = "4th Year"
+            elif student.year_level == "4th Year":
+                student.role = "ALUMNI"
+                student.year_level = "Alumni"
+                student.section = "Evaluator"
+        
+        db.commit()
+        
+        async def send_roster_update():
+            await manager.broadcast({"event": "ROSTER_UPDATE", "message": "Academic Year Batch Promotion Executed."})
+            
+        background_tasks.add_task(send_roster_update)
+        return {"status": "success", "message": "Batch promotion complete."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/{user_id}/section", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def update_student_section(user_id: str, req: UpdateSectionRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.section = req.section.upper()
+    db.commit()
+    
+    async def send_roster_update():
+        await manager.broadcast({"event": "ROSTER_UPDATE"})
+        
+    background_tasks.add_task(send_roster_update)
+    return {"status": "success"}
+
+@router.put("/{user_id}/subjects", dependencies=[Depends(require_role(["ADMIN", "HEAD_ADMIN"]))])
+def update_faculty_subjects(user_id: str, req: UpdateSubjectsRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.subjects = req.subjects
+    db.commit()
+    
+    async def send_roster_update():
+        await manager.broadcast({"event": "ROSTER_UPDATE"})
+        
+    background_tasks.add_task(send_roster_update)
+    return {"status": "success"}
+
+# ==========================================
+# THE FIX: DYNAMIC WILDCARD ROUTES AT THE BOTTOM
+# ==========================================
+@router.get("/{user_id}")
+def get_user_profile(user_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    return {
+        "status": "success",
+        "user": {
+            "id": user.id,
+            "role": user.role,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "subjects": user.subjects,
+            "section": user.section,
+            "year_level": user.year_level
+        }
+    }

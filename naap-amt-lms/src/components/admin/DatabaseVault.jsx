@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../../apiConfig';
+
 export default function DatabaseVault({ triggerModal }) {
   const navigate = useNavigate();
   const currentClearanceLevel = parseInt(localStorage.getItem('adminClearance') || '0', 10);
@@ -30,7 +33,8 @@ export default function DatabaseVault({ triggerModal }) {
   const fetchVaultData = async () => {
     try {
       setIsLoading(true);
-      const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/assets');
+      // SYNCED TO API_BASE_URL
+      const res = await fetch(`${API_BASE_URL}api/vault/assets`);
       if (res.ok) {
         const data = await res.json();
         setGlobalModules(data.modules);
@@ -46,9 +50,11 @@ export default function DatabaseVault({ triggerModal }) {
 useEffect(() => {
     fetchVaultData();
     
-    // THE FIX: Listen for Live Backend WebSocket Events
+    // THE FIX: Listen for Live Backend WebSocket Events (Synced to API_BASE_URL)
     const token = localStorage.getItem('token');
-const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?token=${token}`);
+    const wsUrl = `${API_BASE_URL}api/ws/connect?token=${token}`.replace('https://', 'wss://').replace('http://', 'ws://');
+    const ws = new WebSocket(wsUrl);
+    
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.event === "VAULT_UPDATE") {
@@ -74,7 +80,8 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
       message: `Change ${title} (${id}) status to ${newStatus}?`,
       onYes: async () => {
         try {
-            await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/status/${id}`, {
+            // SYNCED TO API_BASE_URL
+            await fetch(`${API_BASE_URL}api/vault/status/${id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: newStatus })
@@ -100,7 +107,8 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
         targetId: id,
         onYes: async () => {
             try {
-                await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/purge/${id}?type=${type}`, { method: 'DELETE' });
+                // SYNCED TO API_BASE_URL
+                await fetch(`${API_BASE_URL}api/vault/purge/${id}?type=${type}`, { method: 'DELETE' });
                 alert(`[SYSTEM] Asset ${id} permanently deleted.`);
                 fetchVaultData();
             } catch (e) { alert("Failed to purge asset."); }
@@ -115,7 +123,6 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
         title: `Enter ${type} Studio?`,
         message: `Bypass normal routing and open the Read-Only Studio for ${title} (${id})?`,
         onYes: () => {
-            // FIX: Replaced alert with dynamic standard routing to the respective UI
             if (type === 'MODULE') {
                 navigate(`/reader/${id}`, { state: { title, mode: 'READ_ONLY' } });
             } else {
@@ -198,6 +205,15 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
                 </td>
                 <td className="py-4 text-right pr-2">
                   <div className="flex justify-end gap-2">
+                    
+                    {/* THE FIX: Generate CAAP Master Deck Button */}
+                    <button 
+                       onClick={() => navigate('/flashcards', { state: { topic: mod.title } })} 
+                       className="text-[9px] font-black px-3 py-1.5 rounded border border-emerald-700 text-emerald-400 hover:bg-emerald-900/50 uppercase tracking-widest transition-colors flex items-center gap-1"
+                    >
+                       <span>📇</span> Master Deck
+                    </button>
+
                     <button onClick={() => handleTestView(mod.id, mod.title, 'MODULE')} className="text-[9px] font-black px-3 py-1.5 rounded border border-slate-700 text-blue-400 hover:bg-slate-800 uppercase tracking-widest transition-colors">Test / View</button>
                     
                     {/* Soft Purge Toggle */}
@@ -256,7 +272,7 @@ const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?
                   </div>
                 </td>
               </tr>
-            )))}
+            ))) }
           </tbody>
         </table>
       </div>

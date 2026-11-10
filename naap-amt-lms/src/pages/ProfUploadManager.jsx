@@ -1,6 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
+// THE FIX: Import the live sync engine
+import useLiveSync from '../components/shared/useLiveSync';
+
 import UploadTerminal from '../components/UploadTerminal';
 import WorkspaceHub from '../components/WorkspaceHub';
 import AssessmentStudio from '../components/AssessmentStudio';
@@ -17,9 +22,10 @@ export default function ProfUploadManager() {
   const [uploadAsIs, setUploadAsIs] = useState(false); 
   const [isProcessingPhase3, setIsProcessingPhase3] = useState(false); 
 
-  const profName = localStorage.getItem('profName') || "ALONZO, Eduardo";
-  const userRole = localStorage.getItem('role') || 'FACULTY'; 
-  const userId = localStorage.getItem('userId') || "FAC-2024-0891";
+  // THE FIX: Transitioned identity retrieval from localStorage to sessionStorage
+  const profName = sessionStorage.getItem('profName') || "ALONZO, Eduardo";
+  const userRole = sessionStorage.getItem('role') || 'FACULTY'; 
+  const userId = sessionStorage.getItem('userId') || "FAC-2024-0891";
 
   const attributionString = userRole === 'HEAD_ADMIN'
     ? `HEAD ADMIN BYPASS OVERRIDE | Uploaded: ${new Date().toLocaleDateString()}`
@@ -122,14 +128,13 @@ export default function ProfUploadManager() {
     setLogs(['> Initiating secure connection to NAAP Server...', '> Triggering AMT Sentinel Gatekeeper...']);
 
     try {
-        const token = localStorage.getItem('token'); // Grab the token
+        const token = sessionStorage.getItem('token'); 
         const formData = new FormData();
         files.forEach(file => formData.append("files", file));
         formData.append("user_id", userId);
         formData.append("upload_as_is", uploadAsIs);
 
-        // THE FIX 1: Inject Token into Upload Route
-        const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/upload', { 
+        const response = await fetch(`${API_BASE_URL}api/modules/upload`, { 
             method: 'POST', 
             headers: { 'Authorization': `Bearer ${token}` },
             body: formData 
@@ -154,13 +159,12 @@ export default function ProfUploadManager() {
   const handleScanTopics = async () => {
     setIsScanning(true);
     try {
-      const token = localStorage.getItem('token'); // Grab the token
+      const token = sessionStorage.getItem('token'); 
       const rawChunk = extractedChunks[0];
       if (!rawChunk) throw new Error("No raw document data found in memory.");
       const payload = { context: rawChunk.content, user_id: userId };
       
-      // THE FIX 2: Inject Token into Discover Topics Route
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/modules/discover-topics', {
+      const response = await fetch(`${API_BASE_URL}api/modules/discover-topics`, {
         method: 'POST', 
         headers: { 
             'Content-Type': 'application/json',
@@ -206,7 +210,7 @@ export default function ProfUploadManager() {
   };
 
   const executeDatabasePush = async (assetType, targetStatus) => {
-    const token = localStorage.getItem('token'); // Grab the token
+    const token = sessionStorage.getItem('token'); 
     const assetId = `${assetType === 'QUIZ' ? 'QZ' : 'MOD'}-${Math.floor(1000 + Math.random() * 9000)}`;
     const category = assetType === 'QUIZ' ? quizTargetSubFolder : moduleTargetSubFolder;
     const authorName = userRole === 'HEAD_ADMIN' ? 'Head Admin' : profName;
@@ -232,8 +236,7 @@ export default function ProfUploadManager() {
         status: targetStatus
     };
 
-    // THE FIX 3: Inject Token into Save Vault Route
-    const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/save', {
+    const res = await fetch(`${API_BASE_URL}api/vault/save`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',
@@ -259,7 +262,6 @@ export default function ProfUploadManager() {
       
       alert(`System Sync Complete. Assets saved as ${targetStatus}.`);
       
-      // Clear safety hooks by clearing state before redirect
       setUploadState('IDLE');
       setStagedModuleContent(null);
       setStagedQuizContent(null);
@@ -315,7 +317,6 @@ export default function ProfUploadManager() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-300 font-sans p-2 md:p-6 flex flex-col items-center overflow-x-hidden relative" onClick={() => setContextMenu(null)}>
       <div className="w-full max-w-[105rem] animate-fade-in flex flex-col h-full">
-        {/* THE FIX: Replaced standard onClick with the interceptor logic */}
         <button 
           onClick={handleBackNavigation} 
           className="text-slate-600 hover:text-white text-[11px] font-black uppercase tracking-[0.2em] mb-4 flex items-center gap-2 transition-colors shrink-0 w-max"

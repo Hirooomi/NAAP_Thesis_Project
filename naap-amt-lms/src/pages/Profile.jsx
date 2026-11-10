@@ -1,6 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Support from './Support'; 
+
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
+import useLiveSync from "../components/shared/useLiveSync";
 
 // Pure SVG Line Art Icons
 const EyeIcon = () => (
@@ -12,12 +16,12 @@ const EyeOffIcon = () => (
 
 export default function Profile() {
   const navigate = useNavigate();
-  const location = useLocation(); // THE FIX: Allows catching routing requests from ProfDashboard
-  const userId = localStorage.getItem('userId') || 'UNKNOWN';
-  const role = localStorage.getItem('role') || 'STUDENT';
-  const isForcedChange = localStorage.getItem('forcePassChange') === 'true';
+  const location = useLocation(); 
+  
+  const userId = sessionStorage.getItem('userId') || 'UNKNOWN';
+  const role = sessionStorage.getItem('role') || 'STUDENT';
+  const isForcedChange = sessionStorage.getItem('forcePassChange') === 'true';
 
-  // THE FIX: Check if we were routed here to open a specific tab
   const initialTab = location.state?.activeTab || (isForcedChange ? 'SECURITY' : 'MAILBOX');
   const [activeTab, setActiveTab] = useState(initialTab);
   
@@ -32,47 +36,44 @@ export default function Profile() {
   const [showNewPass, setShowNewPass] = useState(false);
   const [showConfirmPass, setShowConfirmPass] = useState(false);
 
-  const [announcements, setAnnouncements] = useState([]);
-  const [isLoadingMail, setIsLoadingMail] = useState(false);
-
-  useEffect(() => {
-    if (activeTab === 'MAILBOX') {
-      setIsLoadingMail(true);
-      const token = localStorage.getItem('token');
-      fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/announcements', {
-          headers: { 'Authorization': `Bearer ${token}` }
-      })
-        .then(res => res.json())
-        .then(data => setAnnouncements(data.announcements || []))
-        .catch(err => console.error("Mailbox offline"))
-        .finally(() => setIsLoadingMail(false));
-    }
-  }, [activeTab]);
+  // THE FIX: Single-line silent fetch for System Inbox
+  const { data: mailboxData, isLoading: isLoadingMail } = useLiveSync('api/comms/announcements', ['SYSTEM_MAIL']);
+  const announcements = mailboxData?.announcements || [];
 
   const requestOTP = async () => {
     setIsProcessing(true);
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/auth/request-auth-otp', {
+      const token = sessionStorage.getItem('token'); 
+      const response = await fetch(`${API_BASE_URL}api/auth/request-auth-otp`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}` // ENSURE HEADER IS HERE
+            'Authorization': `Bearer ${token}` 
         },
         body: JSON.stringify({ user_id: userId })
       });
-      const data = await response.json();
+      
+      if (response.status === 429) {
+          setTimeout(() => alert("⚠️ SECURITY COOLDOWN: Please wait 5 minutes before requesting another OTP. Check your inbox or spam folder for the previously sent email."), 100);
+          return;
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (err) {
+        throw new Error("Invalid server response format.");
+      }
+
       if (response.ok) {
         setIsOtpSent(true);
-        alert("[SYSTEM] OTP Dispatched to your registered email. Valid for 10 minutes.");
+        setTimeout(() => alert("[SYSTEM] OTP Dispatched to your registered email. Valid for 10 minutes."), 100);
       } else {
-        alert(`[ERROR] ${data.detail}`);
-        // THE FIX: Must stop spinner if backend rejects the request
-        setIsProcessing(false); 
+        setTimeout(() => alert(`[ERROR] ${data?.detail || "Request failed."}`), 100);
       }
     } catch (e) {
-      alert("Network error. Ensure server is online and tunnel is cleared.");
-      // THE FIX: Must stop spinner if network fails completely
+      setTimeout(() => alert(`Network error: ${e.message}`), 100);
+    } finally {
       setIsProcessing(false); 
     }
   };
@@ -86,31 +87,36 @@ export default function Profile() {
     
     setIsProcessing(true);
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/auth/update-password', {
+      const token = sessionStorage.getItem('token'); 
+      const response = await fetch(`${API_BASE_URL}api/auth/update-password`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}` // ENSURE HEADER IS HERE
+            'Authorization': `Bearer ${token}` 
         },
         body: JSON.stringify({ user_id: userId, old_password: oldPassword, otp, new_password: newPassword })
       });
       
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch (err) {
+        throw new Error("Invalid server response format.");
+      }
+
       if (response.ok) {
-        alert("[SUCCESS] Password Secured.");
-        localStorage.removeItem('forcePassChange'); 
-        
-        if (role === 'FACULTY' || role === 'HEAD_ADMIN') navigate('/prof');
-        else navigate('/dashboard'); 
+        sessionStorage.removeItem('forcePassChange'); 
+        setTimeout(() => {
+            alert("[SUCCESS] Password Secured.");
+            if (role === 'FACULTY' || role === 'HEAD_ADMIN') navigate('/prof');
+            else navigate('/dashboard'); 
+        }, 100);
       } else {
-        alert(`[ERROR] ${data.detail}`);
-        // THE FIX: Must stop spinner if backend rejects the OTP/Password
-        setIsProcessing(false); 
+        setTimeout(() => alert(`[ERROR] ${data?.detail || "Password update failed."}`), 100);
       }
     } catch (e) {
-      alert("Network error.");
-      // THE FIX: Must stop spinner if network fails completely
+      setTimeout(() => alert(`Network error: ${e.message}`), 100);
+    } finally {
       setIsProcessing(false); 
     }
   };
@@ -205,7 +211,6 @@ export default function Profile() {
       {activeTab === 'IT_SUPPORT' && (
         <div className="bg-slate-950 border border-slate-800 rounded-3xl shadow-xl overflow-hidden relative">
             <div className="absolute top-0 right-0 p-4"><span className="text-[9px] font-mono text-slate-600 uppercase tracking-widest">Routing to Support Module...</span></div>
-            {/* THE FIX: Injects 'URGENT' priority tag for Faculty submissions */}
             <Support defaultPriority={role === 'FACULTY' ? 'URGENT' : 'NORMAL'} requesterId={userId} requesterRole={role} /> 
         </div>
       )}

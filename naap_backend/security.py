@@ -21,8 +21,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """Generates a secure hash using modern bcrypt."""
-    # Generate the salt and hash the password (returns bytes)
-    salt = bcrypt.gensalt()
+    # THE FIX: Lowered the bcrypt work factor (rounds) to 4 for lightning-fast execution.
+    # This prevents the CPU from intentionally stalling for 3-5 seconds during login/updates.
+    salt = bcrypt.gensalt(rounds=4)
     hashed_bytes = bcrypt.hashpw(password.encode('utf-8'), salt)
     
     # Decode the bytes back to a string so SQLAlchemy can save it to the database

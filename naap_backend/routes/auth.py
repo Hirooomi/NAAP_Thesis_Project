@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 import random
@@ -9,7 +9,7 @@ import models
 import security
 import email_service
 from database import get_db
-from dependencies import get_current_user # THE FIX: Centralized Security
+from dependencies import get_current_user 
 
 router = APIRouter(prefix="/api/auth", tags=["Core Authentication"])
 
@@ -34,7 +34,6 @@ class AuthPasswordUpdatePayload(BaseModel):
     otp: str
     new_password: str
 
-# THE FIX: Enterprise Password Validation Engine
 def validate_password_strength(password: str):
     if len(password) < 7 or len(password) > 16:
         raise HTTPException(status_code=400, detail="Password must be exactly 7 to 16 characters in length.")
@@ -63,63 +62,76 @@ def login(payload: LoginPayload, db: Session = Depends(get_db)):
     db.commit()
 
     full_name = f"{user.first_name} {user.last_name}"
-    if user.role == "FACULTY" and user.honorific:
-        full_name = f"{user.honorific} {user.last_name}, {user.first_name}"
+    if user.role == "FACULTY":
+        honorific_part = f"{user.honorific} " if hasattr(user, 'honorific') and user.honorific and user.honorific != "None" else ""
+        suffix_part = f" {user.suffix}" if hasattr(user, 'suffix') and user.suffix and user.suffix != "None" else ""
+        full_name = f"{honorific_part}{user.last_name}, {user.first_name}{suffix_part}".strip()
 
     is_temp_pass = payload.password.startswith("NAAP-")
+
+    # STRICT RBAC FIX: Safely parse assigned subjects for the frontend
+    assigned_subjects = "General Aviation"
+    if hasattr(user, 'assigned_subjects') and user.assigned_subjects:
+        assigned_subjects = user.assigned_subjects
+    elif hasattr(user, 'subjects') and user.subjects:
+        assigned_subjects = user.subjects
+        
+    if isinstance(assigned_subjects, list):
+        assigned_subjects = ", ".join(assigned_subjects)
+    else:
+        assigned_subjects = str(assigned_subjects)
 
     return {
         "token": token,
         "role": user.role,
         "id": user.id,
         "name": full_name,
+        "subjects": assigned_subjects,
         "require_password_change": is_temp_pass
     }
 
 @router.post("/forgot-password")
-def request_password_reset(payload: PasswordResetRequestPayload, db: Session = Depends(get_db)):
+def request_password_reset(payload: PasswordResetRequestPayload, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user:
         return {"status": "success", "message": "If the email is registered, an OTP has been dispatched."}
 
     now = datetime.datetime.utcnow()
     
-    # THE FIX: Persistent Anti-Spam Check via Database
     recent_otp = db.query(models.OTP_Token).filter(models.OTP_Token.user_id == user.id).order_by(models.OTP_Token.created_at.desc()).first()
     if recent_otp and (now - recent_otp.created_at).total_seconds() < 300: 
         raise HTTPException(status_code=429, detail="Anti-Spam active. Please wait 5 minutes before requesting a new OTP.")
 
-    # Purge old tokens to prevent buildup
     db.query(models.OTP_Token).filter(models.OTP_Token.user_id == user.id).delete()
 
     otp_code = "".join(random.choices("0123456789", k=6))
     expiration = now + datetime.timedelta(minutes=10) 
     
-    # THE FIX: Hash the OTP before inserting it into the persistent DB
     hashed_otp = security.get_password_hash(otp_code)
     new_token = models.OTP_Token(user_id=user.id, hashed_token=hashed_otp, expiration_timestamp=expiration)
     db.add(new_token)
     db.commit()
 
-    try:
-        email_service.dispatch_global_announcement(
-            header="NAAP AMT: Secure Password Reset Request",
-            message=f"Hello {user.first_name}.\n\nYou requested a password reset. Your secure 6-digit verification code is:\n\n{otp_code}\n\nThis code will expire in 10 minutes. If you did not make this request, secure your account immediately.",
-            severity="MODERATE",
-            recipient_emails=[user.email]
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Mail dispatch failure. Check SMTP configurations.")
+    email_body = f"Hello {user.first_name}.\n\nYou requested a password reset. Your secure 6-digit verification code is:\n\n{otp_code}\n\nThis code will expire in 10 minutes. If you did not make this request, secure your account immediately."
+    
+    background_tasks.add_task(
+        email_service.dispatch_global_announcement,
+        header="NAAP AMT: Secure Password Reset Request",
+        message=email_body,
+        severity="MODERATE",
+        recipient_emails=[user.email]
+    )
 
     return {"status": "success", "message": "OTP successfully dispatched."}
 
 @router.post("/verify-reset-otp")
 def verify_otp_and_reset_password(payload: OTPVerifyPayload, db: Session = Depends(get_db)):
+    validate_password_strength(payload.new_password)
+
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="User account no longer found in registry database.")
 
-    # THE FIX: Query the DB for the token
     token_record = db.query(models.OTP_Token).filter(models.OTP_Token.user_id == user.id).first()
     if not token_record:
         raise HTTPException(status_code=400, detail="No active password reset workflow found for this email.")
@@ -132,21 +144,14 @@ def verify_otp_and_reset_password(payload: OTPVerifyPayload, db: Session = Depen
     if not security.verify_password(payload.otp, token_record.hashed_token):
         raise HTTPException(status_code=400, detail="Invalid OTP code verification failure.")
 
-    validate_password_strength(payload.new_password)
-
     user.hashed_password = security.get_password_hash(payload.new_password)
     db.delete(token_record)
     db.commit()
 
     return {"status": "success", "message": "Password updated successfully in database."}
 
-# ====================================================
-# AUTHENTICATED COMMAND CENTER SECURITY ROUTES
-# ====================================================
-
 @router.post("/request-auth-otp")
-def request_auth_otp(payload: AuthOTPRequestPayload, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Security: Verify the token matches the requested user ID
+def request_auth_otp(payload: AuthOTPRequestPayload, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     if current_user.id != payload.user_id and current_user.role != "HEAD_ADMIN":
         raise HTTPException(status_code=403, detail="Unauthorized attempt to request OTP for another user.")
 
@@ -169,20 +174,22 @@ def request_auth_otp(payload: AuthOTPRequestPayload, db: Session = Depends(get_d
     db.add(new_token)
     db.commit()
 
-    try:
-        email_service.dispatch_global_announcement(
-            header="NAAP AMT: Secure Profile Password Change",
-            message=f"Hello {user.first_name}.\n\nYou requested to change your password from within your Command Center. Your secure verification code is:\n\n{otp_code}\n\nThis code expires in 10 minutes.",
-            severity="MODERATE",
-            recipient_emails=[user.email]
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Mail dispatch failure. Check SMTP settings.")
+    email_body = f"Hello {user.first_name}.\n\nYou requested to change your password from within your Command Center. Your secure verification code is:\n\n{otp_code}\n\nThis code expires in 10 minutes."
+
+    background_tasks.add_task(
+        email_service.dispatch_global_announcement,
+        header="NAAP AMT: Secure Profile Password Change",
+        message=email_body,
+        severity="MODERATE",
+        recipient_emails=[user.email]
+    )
 
     return {"status": "success", "message": f"OTP successfully dispatched to {user.email}"}
 
 @router.post("/update-password")
 def update_password(payload: AuthPasswordUpdatePayload, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    validate_password_strength(payload.new_password)
+
     if current_user.id != payload.user_id and current_user.role != "HEAD_ADMIN":
         raise HTTPException(status_code=403, detail="Unauthorized password change.")
 
@@ -204,8 +211,6 @@ def update_password(payload: AuthPasswordUpdatePayload, db: Session = Depends(ge
 
     if not security.verify_password(payload.otp, token_record.hashed_token):
         raise HTTPException(status_code=400, detail="Invalid OTP code.")
-
-    validate_password_strength(payload.new_password)
 
     user.hashed_password = security.get_password_hash(payload.new_password)
     db.delete(token_record)

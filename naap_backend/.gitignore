@@ -1,9 +1,22 @@
-# Security
+# Security & Secrets
 .env
+*.env
 
-# Backend
+# Backend Environment & Cache
 venv/
 __pycache__/
+**/__pycache__/
+*.pyc
+
+# Databases & Vector Store
+*.db
+*.sqlite3
+naap_persistent.db
+chroma_db/
+
+# Private Admin Scripts
+set_admin_email.py
+emergency_reset.py
 
 # Frontend
 node_modules/

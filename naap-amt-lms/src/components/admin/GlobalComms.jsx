@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { API_BASE_URL } from "../../apiConfig"; // THE FIX: Permanent Architecture Import
 
 export default function GlobalComms({ triggerModal }) {
   // ==========================================
@@ -21,7 +22,8 @@ export default function GlobalComms({ triggerModal }) {
   // FETCH PENDING COMMS FROM DATABASE
   const fetchPendingComms = async () => {
     try {
-      const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/pending');
+      // SYNCED TO API_BASE_URL
+      const res = await fetch(`${API_BASE_URL}api/comms/pending`);
       if (res.ok) {
         const data = await res.json();
         if (data.pending) {
@@ -44,14 +46,14 @@ export default function GlobalComms({ triggerModal }) {
     setAnnouncementText("Synthesizing parameters with AI Engine...");
     
     try {
-      // THE FIX: Payload perfectly aligned to the backend AIDraftRequest
       const payload = {
         topic: headerText || "System Update",
         date: scheduleDate || "Immediate",
         severity: severity
       };
 
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/ai-draft', {
+      // SYNCED TO API_BASE_URL
+      const response = await fetch(`${API_BASE_URL}api/comms/ai-draft`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -99,7 +101,8 @@ export default function GlobalComms({ triggerModal }) {
             onYes: async () => {
                 setIsDeploying(true);
                 try {
-                    const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/deploy', {
+                    // SYNCED TO API_BASE_URL
+                    const response = await fetch(`${API_BASE_URL}api/comms/deploy`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
@@ -133,7 +136,8 @@ export default function GlobalComms({ triggerModal }) {
         onYes: async () => {
             setIsDeploying(true);
             try {
-                const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/deploy', {
+                // SYNCED TO API_BASE_URL
+                const response = await fetch(`${API_BASE_URL}api/comms/deploy`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -154,10 +158,24 @@ export default function GlobalComms({ triggerModal }) {
     });
   };
 
-  const executeKillSwitchConfirmation = () => {
+  const executeKillSwitchConfirmation = async () => {
     const confirmationText = window.prompt("ULTIMATE AUTHORIZATION REQUIRED.\n\nType 'CONFIRM SHUTDOWN' to sever database connections network-wide.");
     if(confirmationText === "CONFIRM SHUTDOWN") {
-        alert("EXECUTION ACCEPTED. Sessions frozen. Offline Review Mode activated.");
+        try {
+            // THE FIX: Trigger the Global WebSocket Broadcast Endpoint
+            const res = await fetch(`${API_BASE_URL}api/ws/trigger-shutdown`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (res.ok) {
+               alert("EXECUTION ACCEPTED. 60-Second Auto-Kick Protocol Initiated across all sessions.");
+            } else {
+               alert("Failed to reach WebSocket Broadcast Server.");
+            }
+        } catch (e) {
+            alert("Network Error: Cannot trigger Global Shutdown.");
+        }
     } else {
         alert("Incorrect code. Shutdown Aborted.");
     }
@@ -268,7 +286,8 @@ export default function GlobalComms({ triggerModal }) {
                     <button onClick={() => { 
                         triggerModal({ type: 'CONFIRM', title: 'Authorize Request?', message: `Deploy this requested broadcast?`, onYes: async () => { 
                             try {
-                                const res = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/comms/approve/${req.id}`, { 
+                                // SYNCED TO API_BASE_URL
+                                const res = await fetch(`${API_BASE_URL}api/comms/approve/${req.id}`, { 
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ approved_by_id: localStorage.getItem('userId') || 'SYSTEM' })

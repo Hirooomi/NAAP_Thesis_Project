@@ -1,3 +1,3 @@
 // src/apiConfig.js
-// Use the URL generated for port 8000
-export const API_BASE_URL = "https://ztp98nvz-8000.asse.devtunnels.ms";
+// Switched back to Dev Tunnels for public mobile and external network testing
+export const API_BASE_URL = "https://9j6zh67b-8000.asse.devtunnels.ms/";

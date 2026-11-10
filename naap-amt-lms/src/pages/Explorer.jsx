@@ -1,6 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
+// THE FIX: Import the live sync engine
+import useLiveSync from '../components/shared/useLiveSync';
+
 export default function Explorer({ mode }) {
   const navigate = useNavigate();
   const location = useLocation(); 
@@ -11,7 +16,6 @@ export default function Explorer({ mode }) {
   const [readModules, setReadModules] = useState([]);
   
   const [curriculum, setCurriculum] = useState({});
-  const [isLoading, setIsLoading] = useState(true);
 
   // THE MASTER CAAP SKELETON
   const baseCurriculum = {
@@ -38,78 +42,46 @@ export default function Explorer({ mode }) {
     }
   };
 
+  const targetType = mode === 'quizzes' ? 'QUIZ' : 'MODULE';
+  
+  // THE FIX: Single-line silent fetch handling all WebSocket updates
+  const { data: vaultData, isLoading } = useLiveSync(`api/vault/catalog?type=${targetType}`, ['VAULT_UPDATE']);
+
+  // THE FIX: Watch for background syncs and re-run the CAAP fuzzy matcher seamlessly
   useEffect(() => {
-    const fetchLiveCatalog = async () => {
-      try {
-        const targetType = mode === 'quizzes' ? 'QUIZ' : 'MODULE';
-        const res = await fetch(`https://ztp98nvz-8000.asse.devtunnels.ms/api/vault/catalog?type=${targetType}`);
-        
-        if (res.ok) {
-          const data = await res.json();
-          const dbTree = JSON.parse(JSON.stringify(baseCurriculum));
+    if (vaultData?.catalog) {
+      const dbTree = JSON.parse(JSON.stringify(baseCurriculum));
+      vaultData.catalog.forEach(item => {
+         let placed = false;
+         const normalizedCategory = (item.category || "").trim().toUpperCase();
 
-          // THE FIX: Robust Fuzzy-Matching CAAP Algorithm
-          data.catalog.forEach(item => {
-             let placed = false;
-             const normalizedCategory = (item.category || "").trim().toUpperCase();
-
-             for (const mainCategory in dbTree) {
-                 // 1. Exact Match Check
-                 if (dbTree[mainCategory][item.category] !== undefined) {
-                     dbTree[mainCategory][item.category].push(item.title);
-                     placed = true; break;
-                 }
-                 
-                 // 2. Fuzzy Sub-Category Match (Handles typos like "Turbine" instead of "Turbine Engines")
-                 const subCategories = Object.keys(dbTree[mainCategory]);
-                 for (const sub of subCategories) {
-                     if (sub.toUpperCase() === normalizedCategory || sub.toUpperCase().includes(normalizedCategory) || normalizedCategory.includes(sub.toUpperCase())) {
-                         dbTree[mainCategory][sub].push(item.title);
-                         placed = true; break;
-                     }
-                 }
-                 if (placed) break;
-
-                 // 3. Main Category Fallback Match
-                 if (mainCategory.toUpperCase() === normalizedCategory || mainCategory.toUpperCase().includes(normalizedCategory)) {
-                     dbTree[mainCategory][subCategories[0]].push(item.title);
+         for (const mainCategory in dbTree) {
+             if (dbTree[mainCategory][item.category] !== undefined) {
+                 dbTree[mainCategory][item.category].push(item.title);
+                 placed = true; break;
+             }
+             const subCategories = Object.keys(dbTree[mainCategory]);
+             for (const sub of subCategories) {
+                 if (sub.toUpperCase() === normalizedCategory || sub.toUpperCase().includes(normalizedCategory) || normalizedCategory.includes(sub.toUpperCase())) {
+                     dbTree[mainCategory][sub].push(item.title);
                      placed = true; break;
                  }
              }
-             
-             // 4. Ultimate Fallback for deeply corrupted metadata
-             if (!placed) {
-                 if (!dbTree['UNCATEGORIZED ASSETS']) dbTree['UNCATEGORIZED ASSETS'] = { 'Recovered Files': [] };
-                 dbTree['UNCATEGORIZED ASSETS']['Recovered Files'].push(item.title);
+             if (placed) break;
+             if (mainCategory.toUpperCase() === normalizedCategory || mainCategory.toUpperCase().includes(normalizedCategory)) {
+                 dbTree[mainCategory][subCategories[0]].push(item.title);
+                 placed = true; break;
              }
-          });
-          
-          setCurriculum(dbTree);
-        }
-      } catch (err) {
-        console.error("Database connection failed.");
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchLiveCatalog();
-
-    // THE FIX: Listen for Live Backend WebSocket Events
-    const token = localStorage.getItem('token');
-const ws = new WebSocket(`wss://ztp98nvz-8000.asse.devtunnels.ms/api/ws/connect?token=${token}`);
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.event === "VAULT_UPDATE") { // FIXED: Triple Equals
-            console.log("[WS] Catalog updated! Refreshing library...");
-            fetchLiveCatalog(); // Instantly refresh the folders without reloading!
-        }
-    };
-    
-    // CLEANUP: Close the websocket when the component unmounts
-    return () => {
-        ws.close();
-    };
-  }, [mode]); // FIXED: Only ONE closing bracket block!
+         }
+         
+         if (!placed) {
+             if (!dbTree['UNCATEGORIZED ASSETS']) dbTree['UNCATEGORIZED ASSETS'] = { 'Recovered Files': [] };
+             dbTree['UNCATEGORIZED ASSETS']['Recovered Files'].push(item.title);
+         }
+      });
+      setCurriculum(dbTree);
+    }
+  }, [vaultData]);
 
   useEffect(() => {
     if (location.state?.openCategory) {

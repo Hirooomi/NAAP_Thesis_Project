@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+// THE PERMANENT ARCHITECTURE FIX
+import { API_BASE_URL } from '../apiConfig';
+
 // THE FIX: Accept props so Profile.jsx can pass down the specific role defaults
 export default function Support({ defaultPriority = "NORMAL", requesterId, requesterRole }) {
   const navigate = useNavigate();
@@ -31,7 +34,8 @@ export default function Support({ defaultPriority = "NORMAL", requesterId, reque
           issue_text: issueText
       };
 
-      const response = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/tickets/submit', {
+      // SYNCED TO API_BASE_URL
+      const response = await fetch(`${API_BASE_URL}api/tickets/submit`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',

@@ -17,7 +17,7 @@ export default function StudentRegistration() {
     setIsProcessing(true);
     try {
       // Backend check: Does this ID and Name exist in the pre-approved whitelist?
-      const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/users/verify-whitelist', {
+      const res = await fetch('https://v7k00hrv-8000.asse.devtunnels.ms/api/users/verify-whitelist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ student_id: studentId, first_name: firstName, last_name: lastName })
@@ -42,7 +42,7 @@ export default function StudentRegistration() {
     setIsProcessing(true);
     try {
       // Finalize the account creation
-      const res = await fetch('https://ztp98nvz-8000.asse.devtunnels.ms/api/users/claim-account', {
+      const res = await fetch('https://v7k00hrv-8000.asse.devtunnels.ms/api/users/claim-account', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ student_id: studentId, email: email, password: password })
