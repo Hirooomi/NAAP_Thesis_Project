@@ -37,3 +37,19 @@ In addition we haven't uploaded a module nor a questionnaire to test both accoun
 The website's storage is also in question, I'm afraid that once I do upload a module and store it locally the files would disappear once I reset the terminal on my studio code.
 Some of the files are hidden due to security reasons like venv, chroma_db, and naap_persistent.db
 
+# FOR THE TERMINAL STEPS: 
+Terminal 1: FastApi Backend
+cd naap_backend
+.\venv\Scripts\activate
+python -m uvicorn main:app --reload --port 8000
+
+
+Terminal 2: Frontend 
+cd naap-amt-lms
+npm run dev
+
+Terminal 3: Public Network Tunneling (For Testing)
+cd naap-amt-lms
+npx localtunnel --port 5173
+
+PORTS> FORWARD A PORT (8000&5173) Set visibility to public
